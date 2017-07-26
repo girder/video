@@ -1,0 +1,10 @@
+{
+    "name": "Video",
+    "description": "Process, serve, and display videos.",
+    "version": "0.1.0",
+    "dependencies": ["worker"],
+    "npm": {
+        "dependencies": {
+        }
+    }
+}

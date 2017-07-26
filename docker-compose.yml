@@ -1,0 +1,14 @@
+version: '3'
+services:
+  mongo:
+    image: mongo
+    volumes:
+      - './data:/data/db'
+
+  girder:
+    build: .
+    ports:
+      - '8080:8080'
+
+    command: '-d mongodb://mongo:27017/girder'
+

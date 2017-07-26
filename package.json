@@ -1,0 +1,15 @@
+{
+  "name": "video",
+  "version": "0.1.0",
+  "description": "A Girder plugin to process, serve, and display videos.",
+  "homepage": "https://github.com/girder/video",
+  "bugs": {
+    "url": "https://github.com/girder/video/issues"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/girder/video.git"
+  },
+  "scripts": {}
+}
