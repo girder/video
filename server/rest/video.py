@@ -22,68 +22,64 @@ import cherrypy
 from girder import logger
 from girder.api import access
 from girder.api.describe import describeRoute, Description
-from girder.api.rest import Resource, loadmodel, filtermodel, RestException
+from girder.api.rest import loadmodel, filtermodel, RestException, boundHandler
 from girder.constants import AccessType, SortDir
 from girder.models.model_base import ValidationException
 
 
-class VideoResource(Resource):
+def addItemRoutes(item):
+    item.route('GET', (':id', 'video'), getVideoMetadata)
+    item.route('PUT', (':id', 'video'), processVideo)
+    item.route('DELETE', (':id', 'video'), deleteProcessedVideo)
+    item.route('GET', (':id', 'video', 'frame'), getVideoFrame)
 
-    def __init__(self):
-        super(VideoResource, self).__init__()
 
-        self.resourceName = 'video'
-        self.route('GET', ('item', ':id', 'video'), self.getVideoMetadata)
-        self.route('PUT', ('item', ':id', 'video'), self.processVideo)
-        self.route('DELETE', ('item', ':id', 'video'),
-                self.deleteProcessedVideo)
-        self.route('GET', ('item', ':id', 'video', 'frame'), self.getVideoFrame)
+@describeRoute(
+    Description('Return video metadata if it exists.')
+    .param('id', 'Id of the item.', paramType='path')
+    .errorResponse()
+    .errorResponse('Read access was denied on the item.', 403)
+)
+@access.public
+@boundHandler
+def getVideoMetadata(self, id, params):
+    return {
+        'a': 1,
+        'b': 2
+    }
 
-    @describeRoute(
-        Description('Return video metadata if it exists.')
-        .param('id', 'Id of the item.', paramType='path')
-        .errorResponse()
-        .errorResponse('Read access was denied on the item.', 403)
-    )
-    @access.public
-    # @filtermodel(model='annotation', plugin='video')
-    def getVideoMetadata(self, params):
-        limit, offset, sort = self.getPagingParameters(params, 'lowerName')
-        query = {}
-        item = self.model('item').load(params.get('itemId'), force=True)
-        self.model('item').requireAccess(
-            item, user=self.getCurrentUser(), level=AccessType.READ)
-        query['itemId'] = item['_id']
 
-    @describeRoute(
-        Description('Create a girder-worker job to process the given video.')
-        .param('id', 'Id of the item.', paramType='path')
-        .param('fileId', 'Id of the file to use as the item.', required=False)
-        .errorResponse()
-        .errorResponse('Read access was denied on the item.', 403)
-    )
-    @access.public
-    def processVideo(self, params):
-        pass
+@describeRoute(
+    Description('Create a girder-worker job to process the given video.')
+    .param('id', 'Id of the item.', paramType='path')
+    .param('fileId', 'Id of the file to use as the video.', required=False)
+    .errorResponse()
+    .errorResponse('Read access was denied on the item.', 403)
+)
+@access.public
+def processVideo(self, params):
+    pass
 
-    @describeRoute(
-        Description('Delete the processed results from the given video.')
-        .param('id', 'Id of the item.', paramType='path')
-        .errorResponse()
-        .errorResponse('Write access was denied on the item.', 403)
-    )
-    @access.public
-    def deleteProcessedVideo(self, params):
-        pass
 
-    @describeRoute(
-        Description('Get a single frame from the given video.')
-        .param('id', 'Id of the item.', paramType='path')
-        .param('time', 'Point in time from which to sample the frame.',
-            required=True)
-        .errorResponse()
-        .errorResponse('Read access was denied on the item.', 403)
-    )
-    def getVideoFrame(self, params):
-        pass
+@describeRoute(
+    Description('Delete the processed results from the given video.')
+    .param('id', 'Id of the item.', paramType='path')
+    .errorResponse()
+    .errorResponse('Write access was denied on the item.', 403)
+)
+@access.public
+def deleteProcessedVideo(self, params):
+    pass
+
+
+@describeRoute(
+    Description('Get a single frame from the given video.')
+    .param('id', 'Id of the item.', paramType='path')
+    .param('time', 'Point in time from which to sample the frame.',
+           required=True)
+    .errorResponse()
+    .errorResponse('Read access was denied on the item.', 403)
+)
+def getVideoFrame(self, params):
+    pass
 

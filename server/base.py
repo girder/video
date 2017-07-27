@@ -220,9 +220,9 @@ SettingDefault.defaults.update({
     dependencies={'worker'},
 )
 def load(info):
-    from .rest import VideoResource
+    from .rest import addItemRoutes
 
-    info['apiRoot'].video = VideoResource()
+    addItemRoutes(info['apiRoot'].item)
 
     ModelImporter.model('item').exposeFields(
         level=AccessType.READ, fields='video')

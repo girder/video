@@ -1,0 +1,41 @@
+version: '3'
+volumes:
+  girder: {}
+  db: {}
+services:
+  mongo:
+    image: mongo
+    volumes:
+      - 'db:/data/db'
+
+  'core-build':
+    build: ./build
+    volumes:
+      - 'girder:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - mongo
+
+  'video-build':
+    build: ./build
+    volumes:
+      - 'girder:/girder'
+      - '..:/girer/plugins/video'
+    depends_on:
+      - mongo
+      - 'core-build'
+    command: '--watch-plugin video'
+
+  girder:
+    build: ./web
+    ports:
+      - '8080:8080'
+    volumes:
+      - 'girder:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - mongo
+      - 'core-build'
+      - 'video-build'
+    command: '-d mongodb://mongo:27017/girder'
+
