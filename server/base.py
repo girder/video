@@ -59,52 +59,74 @@ def _postUpload(event):
     ##     Item.save(item)
 
 
-def _updateJob(event):
+def updateJob(event):
     """
-    Called when a job is saved, updated, or removed.  If this is a large image
+    Called when a job is saved, updated, or removed.  If this is a video
     job and it is ended, clean up after it.
     """
-    pass
-    ## global JobStatus
-    ## if not JobStatus:
-    ##     from girder.plugins.jobs.constants import JobStatus
+    global JobStatus
+    if not JobStatus:
+        from girder.plugins.jobs.constants import JobStatus
 
-    ## job = event.info['job'] if event.name == 'jobs.job.update.after' else event.info
-    ## meta = job.get('meta', {})
-    ## if (meta.get('creator') != 'large_image' or not meta.get('itemId') or
-    ##         meta.get('task') != 'createImageItem'):
-    ##     return
-    ## status = job['status']
-    ## if event.name == 'model.job.remove' and status not in (
-    ##         JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
-    ##     status = JobStatus.CANCELED
-    ## if status not in (JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
-    ##     return
-    ## item = ModelImporter.model('item').load(meta['itemId'], force=True)
-    ## if not item or 'largeImage' not in item:
-    ##     return
-    ## if item.get('largeImage', {}).get('expected'):
-    ##     # We can get a SUCCESS message before we get the upload message, so
-    ##     # don't clear the expected status on success.
-    ##     if status != JobStatus.SUCCESS:
-    ##         del item['largeImage']['expected']
-    ## notify = item.get('largeImage', {}).get('notify')
-    ## msg = None
-    ## if notify:
-    ##     del item['largeImage']['notify']
-    ##     if status == JobStatus.SUCCESS:
-    ##         msg = 'Large image created'
-    ##     elif status == JobStatus.CANCELED:
-    ##         msg = 'Large image creation canceled'
-    ##     else:  # ERROR
-    ##         msg = 'FAILED: Large image creation failed'
-    ##     msg += ' for item %s' % item['name']
-    ## if (status in (JobStatus.ERROR, JobStatus.CANCELED) and
-    ##         'largeImage' in item):
-    ##     del item['largeImage']
-    ## ModelImporter.model('item').save(item)
-    ## if msg and event.name != 'model.job.remove':
-    ##     ModelImporter.model('job', 'jobs').updateJob(job, progressMessage=msg)
+    job = (
+        event.info['job']
+        if event.name == 'jobs.job.update.after'
+        else event.info
+    )
+
+    jobVideoData = job.get('meta', {}).get('video_plugin')
+    if jobVideoData is None:
+        return
+
+    videoItemId = jobVideoData.get('itemId')
+    videoFileId = jobVideoData.get('fileId')
+    if videoItemId is None or videoFileId is None:
+        return
+
+    status = job['status']
+    if event.name == 'model.job.remove' and status not in (
+            JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
+        status = JobStatus.CANCELED
+    if status not in (JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
+        return
+
+    item = ModelImporter.model('item').load(videoItemId, force=True)
+    if not item:
+        return
+
+    itemVideoData = item.get('video')
+    if itemVideoData is None:
+        return
+
+    # TODO(opadron): remove this after this section is finished
+    print(
+        'Found video item %s from job %s' %
+        (videoItemId, str(job['_id'])))
+
+    # if item.get('largeImage', {}).get('expected'):
+    #     # We can get a SUCCESS message before we get the upload message, so
+    #     # don't clear the expected status on success.
+    #     if status != JobStatus.SUCCESS:
+    #         del item['largeImage']['expected']
+
+    # notify = item.get('largeImage', {}).get('notify')
+    # msg = None
+    # if notify:
+    #     del item['largeImage']['notify']
+    #     if status == JobStatus.SUCCESS:
+    #         msg = 'Large image created'
+    #     elif status == JobStatus.CANCELED:
+    #         msg = 'Large image creation canceled'
+    #     else:  # ERROR
+    #         msg = 'FAILED: Large image creation failed'
+    #     msg += ' for item %s' % item['name']
+    # if (status in (JobStatus.ERROR, JobStatus.CANCELED) and
+    #         'largeImage' in item):
+    #     del item['largeImage']
+
+    # ModelImporter.model('item').save(item)
+    # if msg and event.name != 'model.job.remove':
+    #     ModelImporter.model('job', 'jobs').updateJob(job, progressMessage=msg)
 
 
 def checkForLargeImageFiles(event):
@@ -228,9 +250,9 @@ def load(info):
         level=AccessType.READ, fields='video')
 
     events.bind('data.process', 'video', _postUpload)
-    events.bind('jobs.job.update.after', 'video', _updateJob)
-    events.bind('model.job.save', 'video', _updateJob)
-    events.bind('model.job.remove', 'video', _updateJob)
+    events.bind('jobs.job.update.after', 'video', updateJob)
+    events.bind('model.job.save', 'video', updateJob)
+    events.bind('model.job.remove', 'video', updateJob)
     ## events.bind('model.folder.save.after', 'video',
     ##             invalidateLoadModelCache)
     ## events.bind('model.group.save.after', 'video',
