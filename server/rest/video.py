@@ -81,7 +81,7 @@ def processVideo(self, id, params):
 
         if inputFile is None:
             raise RestException(
-                'Item with id=%d has no such file with id=%d' % (id, fileId))
+                'Item with id=%s has no such file with id=%s' % (id, fileId))
 
     if not userToken:
         # It seems like we should be able to use a token without USER_AUTH
@@ -91,92 +91,98 @@ def processVideo(self, id, params):
 
     item = itemModel.load(id, user=user, level=AccessType.READ)
 
-    item['video'] = item.get('video', {})
-    item['video']['dummy'] = True
-    itemModel.save(item)
+    itemVideoData = item.get('video', {})
+    jobId = itemVideoData.get('jobId')
 
-    jobTitle = 'Video Processing'
-    job = jobModel.createJob(
-        title=jobTitle, type='video', user=user, handler='worker_handler')
-    jobToken = jobModel.createJobToken(job)
+    if jobId is None:
+        jobTitle = 'Video Processing'
+        job = jobModel.createJob(
+            title=jobTitle, type='video', user=user, handler='worker_handler')
+        jobToken = jobModel.createJobToken(job)
 
-    job['kwargs'] = job.get('kwargs', {})
-    job['kwargs']['task'] = {
-        'mode': 'docker',
+        job['kwargs'] = job.get('kwargs', {})
+        job['kwargs']['task'] = {
+            'mode': 'docker',
 
-        # TODO(opadron): replace this once we have a maintained image on
-        #                dockerhub
-        'docker_image': 'ffmpeg_local',
-        'pull_image': False,
-        'inputs': [
-            {
-                'id': 'input',
-                'type': 'string',
-                'format': 'text',
-                'target': 'filepath'
-            }
-        ],
-        'outputs': [
-            {
-                'id': '_stdout',
-                'type': 'string',
-                'format': 'text',
-                'target': 'memory'
-            },
-            {
-                'id': '_stderr',
-                'type': 'string',
-                'format': 'text',
-                'target': 'memory'
-            },
-        ]
-    }
+            # TODO(opadron): replace this once we have a maintained image on
+            #                dockerhub
+            'docker_image': 'ffmpeg_local',
+            'pull_image': False,
+            'inputs': [
+                {
+                    'id': 'input',
+                    'type': 'string',
+                    'format': 'text',
+                    'target': 'filepath'
+                }
+            ],
+            'outputs': [
+                {
+                    'id': '_stdout',
+                    'type': 'string',
+                    'format': 'text',
+                    'target': 'memory'
+                },
+                {
+                    'id': '_stderr',
+                    'type': 'string',
+                    'format': 'text',
+                    'target': 'memory'
+                },
+            ]
+        }
 
-    _, itemExt = os.path.splitext(item['name'])
+        _, itemExt = os.path.splitext(item['name'])
 
-    job['kwargs']['inputs'] = {
-        'input': workerUtils.girderInputSpec(
-            inputFile,
-            resourceType='file',
-            token=userToken,
-            name='input_file' + itemExt,
-            dataType='string',
-            dataFormat='text'
-        )
-    }
+        job['kwargs']['inputs'] = {
+            'input': workerUtils.girderInputSpec(
+                inputFile,
+                resourceType='file',
+                token=userToken,
+                name='input_file' + itemExt,
+                dataType='string',
+                dataFormat='text'
+            )
+        }
 
-    job['kwargs']['outputs'] = {
-        '_stdout': workerUtils.girderOutputSpec(
-            item,
-            parentType='item',
-            token=userToken,
-            name='processing_stdout.txt',
-            dataType='string',
-            dataFormat='text'
-        ),
-        '_stderr': workerUtils.girderOutputSpec(
-            item,
-            parentType='item',
-            token=userToken,
-            name='processing_stderr.txt',
-            dataType='string',
-            dataFormat='text'
-        )
-    }
+        job['kwargs']['outputs'] = {
+            '_stdout': workerUtils.girderOutputSpec(
+                item,
+                parentType='item',
+                token=userToken,
+                name='processing_stdout.txt',
+                dataType='string',
+                dataFormat='text'
+            ),
+            '_stderr': workerUtils.girderOutputSpec(
+                item,
+                parentType='item',
+                token=userToken,
+                name='processing_stderr.txt',
+                dataType='string',
+                dataFormat='text'
+            )
+        }
 
-    job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
-        job=job,
-        token=jobToken,
-        logPrint=True)
+        job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
+            job=job,
+            token=jobToken,
+            logPrint=True)
 
-    job['meta'] = job.get('meta', {})
-    job['meta']['video_plugin'] = {
-        'itemId': id,
-        'fileId': fileId
-    }
+        job['meta'] = job.get('meta', {})
+        job['meta']['video_plugin'] = {
+            'itemId': id,
+            'fileId': fileId
+        }
 
-    job = jobModel.save(job)
-    jobModel.scheduleJob(job)
+        job = jobModel.save(job)
+        jobModel.scheduleJob(job)
+
+        item['video'] = item.get('video', {})
+        item['video']['jobId'] = str(job['_id'])
+        itemModel.save(item)
+    else:
+        job = jobModel.load(jobId, level=AccessType.READ, user=user)
 
     return job
 

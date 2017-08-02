@@ -98,6 +98,9 @@ def updateJob(event):
     if itemVideoData is None:
         return
 
+    if itemVideoData['jobId'] != str(job['_id']):
+        return
+
     # TODO(opadron): remove this after this section is finished
     print(
         'Found video item %s from job %s' %
