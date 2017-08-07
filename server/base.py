@@ -26,37 +26,31 @@ from girder.utility import setting_utilities
 
 from . import constants
 
-# This is imported from girder.plugins.jobs.constants, but cannot be done
-# until after the plugin has been found and imported.  If using from an
-# entrypoint, the load of this value must be deferred.
-JobStatus = None
+JobStatus = constants.JobStatus
 
 
 def _postUpload(event):
     """
-    Called when a file is uploaded. We check the parent item to see if it is
-    expecting a large image upload, and if so we register this file as the
-    result image.
+    Called when a file is uploaded. If the file was created by the video
+    plugin's initial processing job, we register this file as such.
     """
-    pass
-    ## fileObj = event.info['file']
-    ## # There may not be an itemId (on thumbnails, for instance)
-    ## if not fileObj.get('itemId'):
-    ##     return
+    reference = event.info.get('reference')
+    if reference != 'videoPlugin':
+        return
 
-    ## Item = ModelImporter.model('item')
-    ## item = Item.load(fileObj['itemId'], force=True, exc=True)
+    file = event.info['file']
+    itemModel = ModelImporter.model('item')
 
-    ## if item.get('largeImage', {}).get('expected') and (
-    ##         fileObj['name'].endswith('.tiff') or
-    ##         fileObj.get('mimeType') == 'image/tiff'):
-    ##     if fileObj.get('mimeType') != 'image/tiff':
-    ##         fileObj['mimeType'] = 'image/tiff'
-    ##         ModelImporter.model('file').save(fileObj)
-    ##     del item['largeImage']['expected']
-    ##     item['largeImage']['fileId'] = fileObj['_id']
-    ##     item['largeImage']['sourceName'] = 'tiff'
-    ##     Item.save(item)
+    item = itemModel.load(file['itemId'], force=True, exc=True)
+    itemVideoData = item.get('video', {})
+    createdFiles = set(itemVideoData.get('createdFiles', []))
+
+    createdFiles.add(str(file['_id']))
+
+    itemVideoData['createdFiles'] = list(createdFiles)
+    item['video'] = itemVideoData
+
+    itemModel.save(item)
 
 
 def updateJob(event):

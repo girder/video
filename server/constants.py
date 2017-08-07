@@ -28,3 +28,22 @@ class PluginSettings:
     VIDEO_AUTO_SET = 'video.auto_set'
     VIDEO_MAX_THUMBNAIL_FILES = 'video.max_thumbnail_files'
     VIDEO_MAX_SMALL_IMAGE_SIZE = 'video.max_small_image_size'
+
+
+class JobStatus:
+    """Deferred loading of Girder's JobStatus constants"""
+    def __init__(self):
+        self._js = None
+
+    @property
+    def js(self):
+        if not self._js:
+            from girder.plugins.jobs.constants import JobStatus as JS
+            self._js = JS
+        return self._js
+
+    def __getattr__(self, k):
+        return getattr(self.js, k)
+
+JobStatus = JobStatus()
+
