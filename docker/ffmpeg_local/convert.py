@@ -5,7 +5,6 @@ import json
 import os.path
 import subprocess
 import sys
-import traceback
 
 from re import compile
 
@@ -17,6 +16,7 @@ RE_DURATION_INFO = compile(r'''^\s+Duration: ''')
 
 FFMPEG = 'ffmpeg'
 
+
 def duration_parse(durstr):
     """Parse a duration of the form [[hh:]mm:]ss[.sss] and return a float
      with the duration or None for failure to parse.
@@ -25,11 +25,12 @@ def duration_parse(durstr):
     try:
         durstr = durstr.strip().split(":")
         dur = 0
-        for part in xrange(len(durstr)):
+        for part in range(len(durstr)):
             dur += float(durstr[-1-part])*(60**part)
     except Exception:
         return None
     return dur
+
 
 subprocess.call(['ls', GIRDER_WORKER_DIR])
 sys.stdout.flush()
@@ -54,19 +55,22 @@ for line in proc.stderr:
                 meta['video']['height'] = int(
                         part.strip().split('x')[1].split()[0].strip())
 
-            elif ' fps' in part and not meta['video'].get('fps'):
-                meta['video']['fps'] = float(part.split(' fps')[0].strip())
+            elif ' fps' in part and not meta['video'].get('frameRate'):
+                meta['video']['frameRate'] = float(
+                        part.split(' fps')[0].strip())
 
             elif ' kb/s' in part and not meta['video'].get('bitRate'):
-                meta['video']['bitRate'] = float(part.split(' kb/s')[0].strip())
+                meta['video']['bitRate'] = float(
+                        part.split(' kb/s')[0].strip())
 
     if RE_AUDIO_INFO.match(line) and not meta['audio'].get('bitRate'):
         for part in line.split(',')[1:]:
             if ' kb/s' in part and not meta['audio'].get('bitRate'):
-                meta['audio']['bitRate'] = float(part.split(' kb/s')[0].strip())
+                meta['audio']['bitRate'] = float(
+                        part.split(' kb/s')[0].strip())
 
-            elif ' Hz' in part and not meta['video'].get('sampleRate'):
-                meta['video']['sampleRate'] = (
+            elif ' Hz' in part and not meta['audio'].get('sampleRate'):
+                meta['audio']['sampleRate'] = (
                         float(part.split(' Hz')[0].strip()))
 
     if RE_DURATION_INFO.match(line) and not meta.get('duration'):
@@ -100,9 +104,12 @@ proc.stderr.close()
 proc.wait()
 
 # TODO(opadron): work out multiple quality versions (-crf 30).
-cmd = [FFMPEG, '-i', input_file, '-vf', 'scale=640x480', '-quality', 'good',
-        '-speed', '0', '-c:v', 'libvpx-vp9', '-crf', '5', '-b:v', '100k', '-c:a',
-        'libopus', os.path.join(GIRDER_WORKER_DIR, 'source.webm')]
+cmd = [
+    FFMPEG, '-i', input_file, '-vf', 'scale=640x480', '-quality', 'good',
+    '-speed', '0', '-c:v', 'libvpx-vp9', '-crf', '5', '-b:v', '100k', '-c:a',
+    'libopus', '-t', '5', os.path.join(GIRDER_WORKER_DIR, 'source.webm')
+]
+
 subprocess.check_call(cmd)
 
 with open(os.path.join(GIRDER_WORKER_DIR, 'meta.json'), 'w') as f:

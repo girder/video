@@ -2,11 +2,18 @@ version: '3'
 volumes:
   girder: {}
   db: {}
+  worker: {}
 services:
   mongo:
     image: mongo
     volumes:
       - 'db:/data/db'
+
+  docker:
+    image: 'docker:dind'
+    privileged: true
+    volumes:
+      - 'worker:/tmp'
 
   'core-build':
     build: ./build
@@ -44,4 +51,20 @@ services:
     ports:
       - '5672:5672'
     command: 'rabbitmq-server --hostname mq --name mq'
+
+  worker:
+    build: ./worker
+    volumes:
+      - 'worker:/tmp'
+      - './ffmpeg_local:/local_images/ffmpeg'
+    depends_on:
+      - docker
+      - mq
+    links:
+      - docker
+      - mq
+    environment:
+      - 'DOCKER_HOST=tcp://docker:2375'
+      - 'CELERY_BROKER=amqp://guest@mq'
+    command: ['--loglevel', 'INFO']
 

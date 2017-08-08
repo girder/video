@@ -205,7 +205,7 @@ def createRoutes(item):
                     'target': 'memory'
                 },
                 {
-                    'id': 'output',
+                    'id': 'source',
                     'type:': 'string',
                     'format': 'text',
                     'target': 'filepath',
@@ -253,7 +253,7 @@ def createRoutes(item):
                 dataFormat='text',
                 reference='videoPlugin'
             ),
-            'output': workerUtils.girderOutputSpec(
+            'source': workerUtils.girderOutputSpec(
                 item,
                 parentType='item',
                 token=userToken,
