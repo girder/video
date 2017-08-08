@@ -4,34 +4,22 @@ volumes:
   db: {}
   worker: {}
 services:
-  mongo:
-    image: mongo
-    volumes:
-      - 'db:/data/db'
-
   docker:
     image: 'docker:dind'
     privileged: true
     volumes:
       - 'worker:/tmp'
 
-  'core-build':
-    build: ./build
+  mongo:
+    image: mongo
     volumes:
-      - 'girder:/girder'
-      - '..:/girder/plugins/video'
-    depends_on:
-      - mongo
+      - 'db:/data/db'
 
-  # 'video-build':
-  #   build: ./build
-  #   volumes:
-  #     - 'girder:/girder'
-  #     - '..:/girer/plugins/video'
-  #   depends_on:
-  #     - mongo
-  #     - 'core-build'
-  #   command: '--watch-plugin video'
+  mq:
+    image: rabbitmq
+    ports:
+      - '5672:5672'
+    command: 'rabbitmq-server --hostname mq --name mq'
 
   girder:
     image: 'girder/girder'
@@ -42,15 +30,49 @@ services:
       - '..:/girder/plugins/video'
     depends_on:
       - mongo
-      - 'core-build'
-      # - 'video-build'
     command: '-d mongodb://mongo:27017/girder'
 
-  mq:
-    image: rabbitmq
-    ports:
-      - '5672:5672'
-    command: 'rabbitmq-server --hostname mq --name mq'
+  'pre-build':
+    build: ./build
+    volumes:
+      - 'girder:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - mongo
+      - girder
+    links:
+      - mongo
+      - girder
+    environment:
+      - 'GIRDER_HOST=http://girder:8080'
+      - 'GIRDER_ADMIN=admin:adminadmin'
+      - 'GIRDER_GRIDFS_DB_NAME=local'
+      - 'GIRDER_USER=girder:girder'
+      - 'GIRDER_BROKER=amqp://guest@mq'
+    command: ['--post-install']
+
+  'core-build':
+    build: ./build
+    volumes:
+      - 'girder:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - mongo
+      - girder
+      - 'pre-build'
+    links:
+      - mongo
+
+  # 'video-build':
+  #   build: ./build
+  #   volumes:
+  #     - 'girder:/girder'
+  #     - '..:/girer/plugins/video'
+  #   depends_on:
+  #     - mongo
+  #     - girder
+  #     - 'pre-build'
+  #   command: '--watch-plugin video'
 
   worker:
     build: ./worker
@@ -67,4 +89,3 @@ services:
       - 'DOCKER_HOST=tcp://docker:2375'
       - 'CELERY_BROKER=amqp://guest@mq'
     command: ['--loglevel', 'INFO']
-
