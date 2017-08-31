@@ -107,7 +107,7 @@ proc.wait()
 cmd = [
     FFMPEG, '-i', input_file, '-vf', 'scale=640x480', '-quality', 'good',
     '-speed', '0', '-c:v', 'libvpx-vp9', '-crf', '5', '-b:v', '100k', '-c:a',
-    'libopus', '-t', '5', os.path.join(GIRDER_WORKER_DIR, 'source.webm')
+    'libopus', os.path.join(GIRDER_WORKER_DIR, 'source.webm')
 ]
 
 subprocess.check_call(cmd)

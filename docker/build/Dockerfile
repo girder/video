@@ -2,9 +2,13 @@
 FROM girder/girder:latest
 MAINTAINER Kitware, Inc. <kitware@kitware.com>
 
+RUN pip install girder-client ansible
+RUN ansible-galaxy install girder.girder
+
 WORKDIR /girder
 COPY entrypoint.sh /gi-entrypoint.sh
-COPY girder-post-install.py /girder-post-install.py
+COPY girder-post-install.yml /girder-post-install.yml
+COPY inventory /etc/ansible/hosts
 
 ENTRYPOINT ["bash", "/gi-entrypoint.sh"]
 CMD ["--watch"]

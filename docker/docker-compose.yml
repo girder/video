@@ -37,6 +37,7 @@ services:
     volumes:
       - 'girder:/girder'
       - '..:/girder/plugins/video'
+      - '../../girder/devops/ansible/roles/girder/library/girder.py:/etc/ansible/roles/girder.girder/library/girder.py'
     depends_on:
       - mongo
       - girder
@@ -44,10 +45,14 @@ services:
       - mongo
       - girder
     environment:
-      - 'GIRDER_HOST=http://girder:8080'
-      - 'GIRDER_ADMIN=admin:adminadmin'
+      - 'GIRDER_HOST=girder'
+      - 'GIRDER_PORT=8080'
+      - 'GIRDER_ADMIN_NAME=admin'
+      - 'GIRDER_ADMIN_PASS=adminadmin'
       - 'GIRDER_GRIDFS_DB_NAME=local'
-      - 'GIRDER_USER=girder:girder'
+      - 'GIRDER_GRIDFS_DB_HOST=mongo'
+      - 'GIRDER_USER_NAME=girder'
+      - 'GIRDER_USER_PASS=girder'
       - 'GIRDER_BROKER=amqp://guest@mq'
     command: ['--post-install']
 
