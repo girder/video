@@ -17,8 +17,6 @@ services:
 
   mq:
     image: rabbitmq
-    ports:
-      - '5672:5672'
     command: 'rabbitmq-server --hostname mq --name mq'
 
   girder:

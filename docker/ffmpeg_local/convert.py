@@ -32,9 +32,6 @@ def duration_parse(durstr):
     return dur
 
 
-subprocess.call(['ls', GIRDER_WORKER_DIR])
-sys.stdout.flush()
-
 input_file = next(glob.iglob(os.path.join(GIRDER_WORKER_DIR, 'input.*')))
 
 cmd = [FFMPEG, '-i', input_file]
