@@ -1,1 +1,26 @@
-video(controls='controls', src=`${src}`)
+.g-video-widget
+  .g-first-line
+    span.status
+      if status === 0
+        i.icon-pause
+      else if status === 2
+        i.icon-spin3.animate-spin
+      else if status === 3
+        i.icon-ok
+      else if status === 4
+        i.icon-cancel
+    span.g-filename= model.name()
+  .btn-group.btn-group-sm.g-button-bar
+    if playing
+      button.btn.btn-default.pause(disabled=status!==3)
+        i.icon-pause
+    else
+      button.btn.btn-default.play(disabled=status!==3)
+        i.icon-play
+    button.btn.btn-default.convert
+      i.icon-arrows-cw
+    button.btn.btn-default.delete
+      i.icon-trash
+
+  if status === 3
+    video.g-video-preview(controls='controls', src=`${src}`)

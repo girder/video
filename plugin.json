@@ -5,6 +5,7 @@
     "dependencies": ["worker"],
     "npm": {
         "dependencies": {
+            "reconcile.js": "github:matthewma7/reconcile.js"
         }
     }
 }

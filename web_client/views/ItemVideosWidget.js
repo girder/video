@@ -23,7 +23,7 @@ var ItemVideosWidget = View.extend({
                 parentView: this
             })
             .render()
-            .$el.appendTo(this.$el);
+            .$el.appendTo(this.$('.g-item-video-content'));
         });
         return this;
     }
