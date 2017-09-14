@@ -4,6 +4,8 @@ import reconcile from 'reconcile.js';
 import View from 'girder/views/View';
 import { getApiRoot, restRequest } from 'girder/rest';
 
+import ModalView from './ModalView';
+
 import template from '../templates/VideoWidget.pug';
 
 import '../stylesheets/VideoWidget.styl';
@@ -17,7 +19,7 @@ var VideoWidget = View.extend({
             setTimeout(() => {
                 this.status = 3;
                 this.render();
-            }, 5000);
+            }, 3000);
         },
         'click button.delete': function (e) {
             this.status = 0;
@@ -29,10 +31,18 @@ var VideoWidget = View.extend({
         },
         'click button.pause': function (e) {
             this.videoElement.pause();
+        },
+        'click button.popup': function (e) {
+            new ModalView({
+                el: $('#g-dialog-container'),
+                model: this.fileModel,
+                parentView: this
+            }).render();
         }
     },
     initialize(settings) {
-        this.model = settings.model;
+        this.fileModel = settings.model;
+        this.modalMode = settings.modalMode;
         this.status = (() => {
             let status = Math.floor(Math.random() * 3);
             if (status !== 0) {
@@ -44,12 +54,12 @@ var VideoWidget = View.extend({
             setTimeout(() => {
                 this.status = 3;
                 this.render();
-            }, 5000);
+            }, 3000);
         }
     },
     render() {
         let getTemplate = () => {
-            return template(Object.assign({ src: `${getApiRoot()}/file/${this.model.id}/download` }, this));
+            return template(Object.assign({ src: `${getApiRoot()}/file/${this.fileModel.id}/download` }, this));
         };
         if (!this.initialized) {
             this.initialized = true;
