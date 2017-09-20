@@ -35,7 +35,6 @@ services:
     volumes:
       - 'girder:/girder'
       - '..:/girder/plugins/video'
-      - '../../girder/devops/ansible/roles/girder/library/girder.py:/etc/ansible/roles/girder.girder/library/girder.py'
     depends_on:
       - mongo
       - girder

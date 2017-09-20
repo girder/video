@@ -139,12 +139,27 @@ changed, their containers will need to be terminated, and their images rebuilt.
  $ docker-compose rm -f cont_a cont_b ...
 
 
- $ docker-compose build cont_a cont_b
- $ docker-compose up -d cont_a cont_b
+ $ docker-compose build cont_a cont_b ...
+ $ docker-compose up -d cont_a cont_b ...
 
         or
 
- $ docker-compose up -d --build cont_a cont_b
+ $ docker-compose up -d --build cont_a cont_b ...
+```
+
+After some time, you might want to rebuild the custom Docker images on top of
+new versions of their bases.  For example, after new features have been added to
+girder, you're likely to want to rebuild the `build` image based on the latest
+`girder/girder` image instead of the one in your docker's cache.
+
+To do this, use the longer form of the above example and add `--no-cache` to
+your build command.
+
+```
+ $ docker-compose down cont_a cont_b ...
+ $ docker-compose rm -f cont_a cont_b ...
+ $ docker-compose build --no-cache cont_a cont_b ...
+ $ docker-compose up -d cont_a cont_b ...
 ```
 
 Finally, as the most destructive option, you can destroy the volumes that are
