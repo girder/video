@@ -1,6 +1,6 @@
 import $ from 'jquery';
 import _ from 'underscore';
-import reconcile from 'reconcile.js';
+import * as reconcile from 'reconcile.js';
 import View from 'girder/views/View';
 import { getApiRoot, restRequest } from 'girder/rest';
 
@@ -82,6 +82,7 @@ var VideoWidget = View.extend({
         });
         return this;
     },
+    // this function updates the DOM instead of destroy and recreate it with reconcile.js, which helps perserve the state of <video>
     update(template) {
         var $new = $(template);
         var changes = reconcile.diff($new[0], this.$el.children(0)[0]);

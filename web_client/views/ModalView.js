@@ -1,6 +1,5 @@
 import $ from 'jquery';
 import _ from 'underscore';
-import reconcile from 'reconcile.js';
 import View from 'girder/views/View';
 import { restRequest } from 'girder/rest';
 import 'girder/utilities/jquery/girderModal';
