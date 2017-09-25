@@ -155,8 +155,12 @@ def createRoutes(item):
             for f in fileIdList:
                 if f == fileId:
                     continue
-                fileModel.remove(fileModel.load(
-                    f, level=AccessType.WRITE, user=user))
+
+                theFile = fileModel.load(
+                        f, level=AccessType.WRITE, user=user)
+
+                if theFile:
+                    fileModel.remove(theFile)
             itemVideoData['createdFiles'] = []
 
         # begin construction of the actual job
@@ -182,6 +186,8 @@ def createRoutes(item):
             # TODO(opadron): replace this once we have a maintained
             #                image on dockerhub
             'docker_image': 'ffmpeg_local',
+            'progress_pipe': True,
+            'a': 'b',
             'pull_image': False,
             'inputs': [
                 {
