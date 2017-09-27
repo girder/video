@@ -47,8 +47,12 @@ using a Python virtual environment if you go this route:
 
 ### Creating a new environment
 
-Now, to create the Video plugin development environment entirely from scratch,
-enter the docker subdirectory
+NOTE: The Video plugin development environment listens on port 8080 for HTTP
+requests.  To avoid issues, ensure that no other processes are listening on that
+port.
+
+To create the Video plugin development environment entirely from scratch, enter
+the docker subdirectory
 
 ```
  $ cd docker
@@ -156,6 +160,8 @@ To do this, use the longer form of the above example and add `--no-cache` to
 your build command.
 
 ```
+ $ docker-compose pull  # get the latest versions of dockerhub images
+
  $ docker-compose down cont_a cont_b ...
  $ docker-compose rm -f cont_a cont_b ...
  $ docker-compose build --no-cache cont_a cont_b ...
