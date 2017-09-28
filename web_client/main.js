@@ -3,8 +3,11 @@ import _ from 'underscore';
 import { wrap } from 'girder/utilities/PluginUtils';
 import ItemView from 'girder/views/body/ItemView';
 import FileListWidget from 'girder/views/widgets/FileListWidget';
+import { registerPluginNamespace } from 'girder/pluginUtils';
 
 import ItemVideosWidget from './views/ItemVideosWidget';
+
+import * as video from './index';
 
 wrap(FileListWidget, 'render', function (render) {
     render.call(this);
@@ -21,3 +24,5 @@ wrap(FileListWidget, 'render', function (render) {
         .$el.appendTo(this.$el);
     }
 });
+
+registerPluginNamespace('video', video)

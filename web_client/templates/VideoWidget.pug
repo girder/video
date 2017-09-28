@@ -26,4 +26,6 @@
         i.icon-resize-full
 
   if status === 3
-    video.g-video-preview(class={'full-width':modalMode}, controls='controls', src=`${src}`)
+    if buildInControl
+      - var attributes = {controls:true}
+    video.g-video-preview(class={'full-width':modalMode}, src=`${src}`)&attributes(attributes)

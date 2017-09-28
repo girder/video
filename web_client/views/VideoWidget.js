@@ -43,6 +43,7 @@ var VideoWidget = View.extend({
     initialize(settings) {
         this.fileModel = settings.model;
         this.modalMode = settings.modalMode;
+        this.buildInControl = !settings.noBuildInControl;
         this.status = (() => {
             let status = Math.floor(Math.random() * 3);
             if (status !== 0) {
