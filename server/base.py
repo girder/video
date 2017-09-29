@@ -34,8 +34,8 @@ def _postUpload(event):
     Called when a file is uploaded. If the file was created by the video
     plugin's initial processing job, we register this file as such.
     """
-    reference = event.info.get('reference')
-    if reference != 'videoPlugin':
+    reference = event.info.get('reference', '')
+    if not reference.startswith('videoPlugin'):
         return
 
     file = event.info['file']
@@ -48,6 +48,12 @@ def _postUpload(event):
     createdFiles.add(str(file['_id']))
 
     itemVideoData['createdFiles'] = list(createdFiles)
+
+    if reference == 'videoPluginMeta':
+        fileModel = ModelImporter.model('file')
+        with fileModel.open(file) as f:
+            itemVideoData['meta'] = json.load(f)
+
     item['video'] = itemVideoData
 
     itemModel.save(item)
@@ -58,10 +64,6 @@ def updateJob(event):
     Called when a job is saved, updated, or removed.  If this is a video
     job and it is ended, clean up after it.
     """
-    global JobStatus
-    if not JobStatus:
-        from girder.plugins.jobs.constants import JobStatus
-
     job = (
         event.info['job']
         if event.name == 'jobs.job.update.after'

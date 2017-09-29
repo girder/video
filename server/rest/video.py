@@ -29,7 +29,6 @@ from girder.api.rest import filtermodel, RestException, \
 
 from girder.constants import AccessType, TokenScope
 from girder.plugins.worker import utils as workerUtils
-# from girder.utility.model_importer import ModelImporter
 
 from ..constants import JobStatus
 
@@ -51,10 +50,10 @@ def createRoutes(item):
     @access.public
     @boundHandler(item)
     def getVideoMetadata(self, id, params):
-        return {
-            'a': 1,
-            'b': 2
-        }
+        user = getCurrentUser()
+        itemModel = self.model('item')
+        item = itemModel.load(id, user=user, level=AccessType.READ)
+        return item.get('video', {}).get('meta', {})
 
     @autoDescribeRoute(
         Description('Create a girder-worker job to process the given video.')
@@ -275,7 +274,7 @@ def createRoutes(item):
                 name='meta.json',
                 dataType='string',
                 dataFormat='text',
-                reference='videoPlugin'
+                reference='videoPluginMeta'
             ),
         }
 
@@ -316,8 +315,37 @@ def createRoutes(item):
     )
     @access.public
     @boundHandler(item)
-    def deleteProcessedVideo(params):
-        pass
+    def deleteProcessedVideo(self, id, params):
+        user = getCurrentUser()
+
+        itemModel = self.model('item')
+        fileModel = self.model('file')
+
+        item = itemModel.load(id, user=user, level=AccessType.READ)
+        itemVideoData = item.get('video', {})
+        fileIdList = itemVideoData.get('createdFiles', [])
+
+        for f in fileIdList:
+            theFile = fileModel.load(
+                    f, level=AccessType.WRITE, user=user)
+            if theFile:
+                fileModel.remove(theFile)
+
+        itemVideoData['createdFiles'] = []
+        itemVideoData.pop('jobId', None)
+
+        itemVideoData = item.get('video', {})
+        jobId = itemVideoData.get('jobId')
+
+        item['video'] = itemVideoData
+        itemModel.save(item)
+
+        return {
+            'message': 'Processed video data deleted.',
+            'itemId': id,
+            'originalJobId': jobId,
+            'removedFiles': fileIdList
+        }
 
 
     @autoDescribeRoute(
