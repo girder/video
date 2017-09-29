@@ -108,10 +108,14 @@ def main():
             calcframe = int(line.split("frame=")[1].split()[0])
             calcdur = duration_parse(line.split(" time=")[1].split()[0])
 
+    fps = 1
     if calcdur:
         meta['duration'] = calcdur
         meta['video']['frameCount'] = calcframe
-        meta['video']['frameRate'] = float(calcframe)/calcdur
+
+        fps = float(calcframe)/calcdur
+        meta['video']['frameRate'] = fps
+        fps = int(fps + 0.5)
 
     proc.stderr.close()
     check_exit_code([proc.wait(), 0][1], cmd)
@@ -120,8 +124,8 @@ def main():
     cmd = [
         FFMPEG, '-i', input_file, '-vf', 'scale=640x480', '-quality', 'good',
         '-threads', '16', '-c:v', 'libvpx-vp9', '-crf', '5',
-        '-b:v', '1000k', '-c:a', 'libopus', os.path.join(GIRDER_WORKER_DIR,
-        'source.webm')]
+        '-b:v', '1000k', '-g', str(fps), '-c:a', 'libopus',
+        os.path.join(GIRDER_WORKER_DIR, 'source.webm')]
 
     sys.stdout.write(' '.join(('RUN:', repr(cmd))))
     sys.stdout.write('\n')
