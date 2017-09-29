@@ -5,6 +5,7 @@
     "dependencies": ["worker"],
     "npm": {
         "dependencies": {
+            "reconcile.js": "^1.3.2"
         }
     }
 }

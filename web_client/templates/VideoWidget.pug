@@ -1,0 +1,31 @@
+.g-video-widget
+  .g-first-line
+    span.status
+      if status === 0
+        i.icon-pause
+      else if status === 2
+        i.icon-spin3.animate-spin
+      else if status === 3
+        i.icon-ok
+      else if status === 4
+        i.icon-cancel
+    span.g-filename= fileModel.name()
+  .btn-group.btn-group-sm.g-button-bar
+    if !playing
+      button.btn.btn-default.play(disabled=status!==3)
+        i.icon-play
+    else
+      button.btn.btn-default.pause(disabled=status!==3)
+        i.icon-pause
+    button.btn.btn-default.convert(disabled=status===2)
+      i.icon-arrows-cw
+    button.btn.btn-default.delete(disabled=status===2||status===0)
+      i.icon-trash
+    if !modalMode
+      button.btn.btn-default.popup(disabled=status!==3)
+        i.icon-resize-full
+
+  if status === 3
+    if buildInControl
+      - var attributes = {controls:true}
+    video.g-video-preview(class={'full-width':modalMode}, src=`${src}`)&attributes(attributes)
