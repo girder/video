@@ -111,7 +111,7 @@ For development, the source directory for the plugin should already be mounted
 and configured so that any changes you make would be integrated on-the-fly in
 the live development environment.
 
-### Shutting Down/Cleanin Up
+### Shutting Down/Cleaning Up
 
 Once you are done working, shut down the docker container ensemble with
 
