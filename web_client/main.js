@@ -25,4 +25,4 @@ wrap(FileListWidget, 'render', function (render) {
     }
 });
 
-registerPluginNamespace('video', video)
+registerPluginNamespace('video', video);
