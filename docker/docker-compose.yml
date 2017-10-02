@@ -1,0 +1,93 @@
+version: '3'
+volumes:
+  web: {}
+  db: {}
+  worker: {}
+services:
+  docker:
+    image: 'docker:dind'
+    privileged: true
+    volumes:
+      - 'worker:/tmp'
+
+  db:
+    image: mongo
+    volumes:
+      - 'db:/data/db'
+
+  mq:
+    image: rabbitmq
+    command: 'rabbitmq-server --hostname mq --name mq'
+
+  web:
+    image: 'girder/girder'
+    ports:
+      - '8080:8080'
+    volumes:
+      - 'web:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - db
+    command: '-d mongodb://db:27017/girder'
+
+  provision:
+    build: ./build
+    volumes:
+      - 'web:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - db
+      - web
+    links:
+      - db
+      - web
+    environment:
+      - 'GIRDER_HOST=web'
+      - 'GIRDER_PORT=8080'
+      - 'GIRDER_ADMIN_NAME=admin'
+      - 'GIRDER_ADMIN_PASS=adminadmin'
+      - 'GIRDER_GRIDFS_DB_NAME=local'
+      - 'GIRDER_GRIDFS_DB_HOST=db'
+      - 'GIRDER_USER_NAME=girder'
+      - 'GIRDER_USER_PASS=girder'
+      - 'GIRDER_BROKER=amqp://guest@mq'
+    command: ['--post-install']
+
+  corewatch:
+    build: ./build
+    volumes:
+      - 'web:/girder'
+      - '..:/girder/plugins/video'
+    depends_on:
+      - db
+      - web
+      - provision
+    links:
+      - db
+
+  # videowatch:
+  #   build: ./build
+  #   volumes:
+  #     - 'web:/girder'
+  #     - '..:/girer/plugins/video'
+  #   depends_on:
+  #     - db
+  #     - web
+  #     - provision
+  #   command: '--watch-plugin video'
+
+  worker:
+    build: ./worker
+    volumes:
+      - 'worker:/tmp'
+      - './ffmpeg_local:/local_images/ffmpeg'
+    depends_on:
+      - docker
+      - mq
+    links:
+      - docker
+      - mq
+    environment:
+      - 'DOCKER_HOST=tcp://docker:2375'
+      - 'CELERY_BROKER=amqp://guest@mq'
+    command: ['--loglevel', 'INFO']

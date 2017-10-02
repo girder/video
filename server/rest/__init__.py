@@ -17,7 +17,7 @@
 #  limitations under the License.
 ##############################################################################
 
-from .video import VideoResource
+from .video import addItemRoutes
 
 
-__all__ = ('VideoResource',)
+__all__ = ('addItemRoutes',)
