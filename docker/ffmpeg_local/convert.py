@@ -122,7 +122,7 @@ def main():
 
     # TODO(opadron): work out multiple quality versions (-crf 30).
     cmd = [
-        FFMPEG, '-i', input_file, '-vf', 'scale=640x480', '-quality', 'good',
+            FFMPEG, '-i', input_file, '-t', '00:00:03', '-vf', 'scale=640x480', '-quality', 'good',
         '-threads', '16', '-c:v', 'libvpx-vp9', '-crf', '5',
         '-b:v', '1000k', '-g', str(fps), '-c:a', 'libopus',
         os.path.join(GIRDER_WORKER_DIR, 'source.webm')]
