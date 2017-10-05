@@ -28,6 +28,12 @@ from . import constants
 
 JobStatus = constants.JobStatus
 
+@setting_utilities.validator({
+    'video.cacheId'
+})
+def validateSettings(doc):
+    id = doc['value']
+    pass
 
 def _postUpload(event):
     """
@@ -38,128 +44,22 @@ def _postUpload(event):
     if not reference.startswith('videoPlugin'):
         return
 
-    file = event.info['file']
-    itemModel = ModelImporter.model('item')
-
-    item = itemModel.load(file['itemId'], force=True, exc=True)
-    itemVideoData = item.get('video', {})
-    createdFiles = set(itemVideoData.get('createdFiles', []))
-
-    createdFiles.add(str(file['_id']))
-
-    itemVideoData['createdFiles'] = list(createdFiles)
-
-    if reference == 'videoPluginMeta':
+    if reference.startswith('videoPlugin:analysis:meta:'):
         fileModel = ModelImporter.model('file')
-        with fileModel.open(file) as f:
-            itemVideoData['meta'] = json.load(f)
+        sourceFileId = reference.split(':')[-1]
+        sourceFile = fileModel.load(
+            sourceFileId, level=AccessType.WRITE, user=event.info['user'])
 
-    item['video'] = itemVideoData
+        vData = sourceFile.get('video', {})
+        sourceFile['video'] = vData
 
-    itemModel.save(item)
+        sourceFormat = vData.get('sourceFormat', {})
+        vData['sourceFormat'] = sourceFormat
 
+        with fileModel.open(event.info['file']) as f:
+            sourceFormat['metadata'] = json.load(f)
 
-def updateJob(event):
-    """
-    Called when a job is saved, updated, or removed.  If this is a video
-    job and it is ended, clean up after it.
-    """
-    job = (
-        event.info['job']
-        if event.name == 'jobs.job.update.after'
-        else event.info
-    )
-
-    jobVideoData = job.get('meta', {}).get('video_plugin')
-    if jobVideoData is None:
-        return
-
-    videoItemId = jobVideoData.get('itemId')
-    videoFileId = jobVideoData.get('fileId')
-    if videoItemId is None or videoFileId is None:
-        return
-
-    status = job['status']
-    if event.name == 'model.job.remove' and status not in (
-            JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
-        status = JobStatus.CANCELED
-    if status not in (JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
-        return
-
-    item = ModelImporter.model('item').load(videoItemId, force=True)
-    if not item:
-        return
-
-    itemVideoData = item.get('video')
-    if itemVideoData is None:
-        return
-
-    if itemVideoData['jobId'] != str(job['_id']):
-        return
-
-    # TODO(opadron): remove this after this section is finished
-    print(
-        'Found video item %s from job %s' %
-        (videoItemId, str(job['_id'])))
-
-    # if item.get('largeImage', {}).get('expected'):
-    #     # We can get a SUCCESS message before we get the upload message, so
-    #     # don't clear the expected status on success.
-    #     if status != JobStatus.SUCCESS:
-    #         del item['largeImage']['expected']
-
-    # notify = item.get('largeImage', {}).get('notify')
-    # msg = None
-    # if notify:
-    #     del item['largeImage']['notify']
-    #     if status == JobStatus.SUCCESS:
-    #         msg = 'Large image created'
-    #     elif status == JobStatus.CANCELED:
-    #         msg = 'Large image creation canceled'
-    #     else:  # ERROR
-    #         msg = 'FAILED: Large image creation failed'
-    #     msg += ' for item %s' % item['name']
-    # if (status in (JobStatus.ERROR, JobStatus.CANCELED) and
-    #         'largeImage' in item):
-    #     del item['largeImage']
-
-    # ModelImporter.model('item').save(item)
-    # if msg and event.name != 'model.job.remove':
-    #     ModelImporter.model('job', 'jobs').updateJob(job, progressMessage=msg)
-
-
-def checkForLargeImageFiles(event):
-    pass
-    ## file = event.info
-    ## possible = False
-    ## mimeType = file.get('mimeType')
-    ## if mimeType in ('image/tiff', 'image/x-tiff', 'image/x-ptif'):
-    ##     possible = True
-    ## exts = file.get('exts')
-    ## if exts and exts[-1] in ('svs', 'ptif', 'tif', 'tiff', 'ndpi'):
-    ##     possible = True
-    ## if not file.get('itemId') or not possible:
-    ##     return
-    ## if not ModelImporter.model('setting').get(
-    ##         constants.PluginSettings.LARGE_IMAGE_AUTO_SET):
-    ##     return
-    ## item = ModelImporter.model('item').load(
-    ##     file['itemId'], force=True, exc=False)
-    ## if not item or item.get('largeImage'):
-    ##     return
-    ## imageItemModel = ModelImporter.model('image_item', 'large_image')
-    ## try:
-    ##     imageItemModel.createImageItem(item, file, createJob=False)
-    ## except Exception:
-    ##     # We couldn't automatically set this as a large image
-    ##     logger.info('Saved file %s cannot be automatically used as a '
-    ##                 'largeImage' % str(file['_id']))
-
-
-def removeThumbnails(event):
-    pass
-    ## ModelImporter.model('image_item', 'large_image').removeThumbnailFiles(
-    ##     event.info)
+        fileModel.save(sourceFile)
 
 
 # Validators
@@ -237,26 +137,16 @@ SettingDefault.defaults.update({
 @plugin.config(
     name='Video',
     description='Process, serve, and display videos.',
-    version='0.1.0',
+    version='0.2.0',
     dependencies={'worker'},
 )
 def load(info):
-    from .rest import addItemRoutes
+    from .rest import addFileRoutes
 
-    addItemRoutes(info['apiRoot'].item)
+    addFileRoutes(info['apiRoot'].file)
 
-    ModelImporter.model('item').exposeFields(
+    ModelImporter.model('file').exposeFields(
         level=AccessType.READ, fields='video')
 
     events.bind('data.process', 'video', _postUpload)
-    events.bind('jobs.job.update.after', 'video', updateJob)
-    events.bind('model.job.save', 'video', updateJob)
-    events.bind('model.job.remove', 'video', updateJob)
-    ## events.bind('model.folder.save.after', 'video',
-    ##             invalidateLoadModelCache)
-    ## events.bind('model.group.save.after', 'video',
-    ##             invalidateLoadModelCache)
-    ## events.bind('model.item.remove', 'video', invalidateLoadModelCache)
-    events.bind('model.file.save.after', 'video',
-                checkForLargeImageFiles)
-    events.bind('model.item.remove', 'video', removeThumbnails)
+
