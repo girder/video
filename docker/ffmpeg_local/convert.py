@@ -39,7 +39,92 @@ def check_exit_code(code, cmd):
             repr(cmd), code))
 
 
-def main():
+def analyze_main(args):
+    input_file = next(glob.iglob(os.path.join(GIRDER_WORKER_DIR, 'input.*')))
+
+    cmd = [FFMPEG, '-i', input_file]
+    sys.stdout.write(' '.join(('RUN:', repr(cmd))))
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+
+    proc = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            universal_newlines=True)
+
+    meta = {'audio': {}, 'video': {}}
+    for line in proc.stderr:
+        if RE_VIDEO_INFO.match(line) and not meta['video'].get('width'):
+            for part in line.split(',')[1:]:
+                if 'x' in part and not meta['video'].get('width'):
+                    meta['video']['width'] = int(
+                            part.split('x')[0].split()[-1].strip())
+
+                    meta['video']['height'] = int(
+                            part.strip().split('x')[1].split()[0].strip())
+
+                elif ' fps' in part and not meta['video'].get('frameRate'):
+                    meta['video']['frameRate'] = float(
+                            part.split(' fps')[0].strip())
+
+                elif ' kb/s' in part and not meta['video'].get('bitRate'):
+                    meta['video']['bitRate'] = float(
+                            part.split(' kb/s')[0].strip())
+
+        if RE_AUDIO_INFO.match(line) and not meta['audio'].get('bitRate'):
+            for part in line.split(',')[1:]:
+                if ' kb/s' in part and not meta['audio'].get('bitRate'):
+                    meta['audio']['bitRate'] = float(
+                            part.split(' kb/s')[0].strip())
+
+                elif ' Hz' in part and not meta['audio'].get('sampleRate'):
+                    meta['audio']['sampleRate'] = (
+                            float(part.split(' Hz')[0].strip()))
+
+        if RE_DURATION_INFO.match(line) and not meta.get('duration'):
+            meta['duration'] = duration_parse(
+                    line.split("Duration:", 1)[1].split(",")[0])
+
+    proc.stderr.close()
+    check_exit_code([proc.wait(), 0][1], cmd)
+
+    cmd.extend(['-vcodec', 'copy', '-an', '-f', 'null', 'null'])
+    sys.stdout.write(' '.join(('RUN:', repr(cmd))))
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+
+    proc = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            universal_newlines=True)
+
+    calcdur = None
+    calcframe = None
+
+    for line in proc.stderr:
+        if line.startswith('frame=') and ' time=' in line:
+            calcframe = int(line.split("frame=")[1].split()[0])
+            calcdur = duration_parse(line.split(" time=")[1].split()[0])
+
+    fps = 1
+    if calcdur:
+        meta['duration'] = calcdur
+        meta['video']['frameCount'] = calcframe
+
+        fps = float(calcframe)/calcdur
+        meta['video']['frameRate'] = fps
+        fps = int(fps + 0.5)
+
+    proc.stderr.close()
+    check_exit_code([proc.wait(), 0][1], cmd)
+
+    meta_dump = json.dumps(meta, indent=2)
+    with open(os.path.join(GIRDER_WORKER_DIR, 'meta.json'), 'w') as f:
+        f.write(meta_dump)
+
+def transcode_main(args):
     input_file = next(glob.iglob(os.path.join(GIRDER_WORKER_DIR, 'input.*')))
 
     cmd = [FFMPEG, '-i', input_file]
@@ -171,8 +256,12 @@ def main():
             f.write(meta_dump)
 
 if __name__ == '__main__':
+    mode = sys.argv[1]
+    args = sys.argv[2:]
+
     try:
-        main()
+        if mode == 'analyze':
+            analyze_main(args)
     finally:
         for fpath in (os.path.join(GIRDER_WORKER_DIR, 'meta.json'),
                       os.path.join(GIRDER_WORKER_DIR, 'source.webm'),):
