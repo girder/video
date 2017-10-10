@@ -18,6 +18,7 @@
 ##############################################################################
 
 import os.path
+from functools import wraps
 
 from cherrypy import HTTPRedirect
 
@@ -64,6 +65,8 @@ def addFileRoutes(file):
         for route, key in routes:
             file.route(method, route, routeHandlers[key])
 
+    return routeHandlers
+
 
 def createRoutes(file):
     def ensureVideoUser(self):
@@ -88,15 +91,36 @@ def createRoutes(file):
         return user
 
 
-    def getFile(self, id):
-        return (
-            self.model('file')
-                .load(id, user=getCurrentUser(), level=AccessType.READ))
+    def getFile(self, id, user=None, level=None):
+        if user is None:
+            user = getCurrentUser()
 
-    def getVideoData(self, id=None, file=None):
+        if level is None:
+            level = AccessType.READ
+
+        result = self.model('file').load(id, user=user, level=level)
+        return result
+
+    def getVideoData(self, id=None, file=None, user=None, level=None):
+        videodataModel = self.model('videodata', 'video')
+
+        if user is None:
+            user = getCurrentUser()
+
+        if level is None:
+            level = AccessType.WRITE
+
         if file is None:
-            file = getFile(self, id)
-        return file.get('video', {})
+            file = getFile(self, id, user=user)
+
+        data = videodataModel.findOne({ 'fileId': file['_id'] })
+
+        if not data:
+            data = videodataModel.createVideoData(file['_id'])
+
+        data = videodataModel.load(data['_id'], user=user, level=level)
+
+        return data
 
 
     def getVideoFormat(self, name=None, id=None, data=None):
@@ -122,6 +146,7 @@ def createRoutes(file):
         fileModel = self.model('file')
         folderModel = self.model('folder')
         collectionModel = self.model('collection')
+        videodataModel = self.model('videodata', 'video')
         cUser = getCurrentUser()
         vUser = ensureVideoUser(self)
 
@@ -142,8 +167,10 @@ def createRoutes(file):
 
         # video identified: ensure the cache for the given format
 
-        if data is None:
+        if file is None:
             file = getFile(self, id)
+
+        if data is None:
             data = getVideoData(self, file=file)
 
         if format is None:  # no format identified: ensure the source cache
@@ -176,7 +203,7 @@ def createRoutes(file):
                             folder, acl, user=vUser, save=True, force=True)
 
                     data['cacheId'] = str(folder['_id'])
-                    fileModel.save(file)
+                    videodataModel.save(data)
                     return folderModel.load(
                         folder['_id'], level=level, user=cUser)
 
@@ -235,25 +262,26 @@ def createRoutes(file):
         vData = getVideoData(self, file=file)
         fileModel = self.model('file')
         jobModel = self.model('job', 'jobs')
+        videodataModel = self.model('videodata', 'video')
         cUser = getCurrentUser()
 
         jobList = []
         formats = []
         if format is None:
-            formats.push(vData.get('sourceFormat'))
+            formats.append(vData.get('sourceFormat'))
             formats.extend(vData.get('formats', []))
         else:
-            formats.push(getVideoFormat(self, name=format, data=vData))
+            formats.append(getVideoFormat(self, name=format, data=vData))
 
         for form in formats:
             jobList.extend(form.pop('frameExtractionJobIds', []))
-            jobList.push(form.pop('jobId', None))
+            jobList.append(form.pop('jobId', None))
 
-        fileModel.save(file)
+        videodataModel.save(vData)
 
         def filterJob(jid):
             if jid:
-                job = jobModel.load(jobId, level=AccessType.READ, user=cUser)
+                job = jobModel.load(jid, level=AccessType.READ, user=cUser)
                 if job:
                     jobModel.cancelJob(job)
                     return True
@@ -273,33 +301,159 @@ def createRoutes(file):
         vData = getVideoData(self, file=file)
         fileModel = self.model('file')
         folderModel = self.model('folder')
+        videodataModel = self.model('videodata', 'video')
         cUser = getCurrentUser()
 
         formats = []
         if format is None:
-            formats.push(vData.get('sourceFormat'))
+            formats.append(vData.get('sourceFormat'))
             formats.extend(vData.get('formats', []))
         else:
-            formats.push(getVideoFormat(self, name=format, data=vData))
+            formats.append(getVideoFormat(self, name=format, data=vData))
 
         for form in formats:
             form.pop('fileId', None)
             form.pop('frames', None)
 
         folder = getCache(
-            format=format, id=id, data=vData,
+            self, format=format, id=id, data=vData,
             level=AccessType.WRITE, file=file, ensure=False)
 
         if folder:
             folderModel.remove(folder)
 
-        fileModel.save(file)
+        videodataModel.save(vData)
 
         return {
             'message': 'Processed video data deleted.',
             'fileId': id,
             'cacheFolderId': folder['_id'] if folder else None
         }
+
+
+    def extractFrames(self, id, numFrames, format=None, user=None):
+        userToken = None
+
+        if user is None:
+            user, userToken = getCurrentUser(True)
+
+        fileModel = self.model('file')
+        folderModel = self.model('folder')
+        tokenModel = self.model('token')
+        jobModel = self.model('job', 'jobs')
+        videodataModel = self.model('videodata', 'video')
+
+        file = getFile(self, id, user=user)
+        vData = getVideoData(self, file=file, user=user)
+        form = getVideoFormat(self, name=format, id=id, data=vData)
+
+        if not userToken:
+            userToken = tokenModel.createToken(
+                user, days=1, scope=TokenScope.USER_AUTH)
+
+        cache = getCache(
+            self, format=format, id=id, data=vData,
+            level=AccessType.WRITE, file=file, ensure=True)
+
+        frames = folderModel.createFolder(
+            parent=cache,
+            name='frames',
+            description='Frame cache for file %s' % str(id),
+            parentType='folder',
+            public=False,
+            creator=user,
+            reuseExisting=True)
+
+        jobTitle = '[video] Frame Extraction'
+        job = jobModel.createJob(
+            title=jobTitle,
+            type='video',
+            user=user,
+            handler='worker_handler'
+        )
+        jobToken = jobModel.createJobToken(job)
+
+        job['kwargs'] = job.get('kwargs', {})
+        job['kwargs']['task'] = {
+            'mode': 'docker',
+
+            # TODO(opadron): replace this once we have a maintained
+            #                image on dockerhub
+            'docker_image': 'ffmpeg_local',
+            'progress_pipe': True,
+            'pull_image': False,
+            'container_args': ['extract', str(numFrames)],
+            'inputs': [
+                {
+                    'id': 'input',
+                    'type': 'string',
+                    'format': 'text',
+                    'target': 'filepath'
+                }
+            ],
+            'outputs': [
+                {
+                    'id': 'frame%d' % index,
+                    'type:': 'string',
+                    'format': 'text',
+                    'target': 'filepath',
+                    'path': '/mnt/girder_worker/data/%d.png' % (index + 1)
+                }
+                for index in range(numFrames)
+            ]
+        }
+
+        _, itemExt = os.path.splitext(file['name'])
+
+        job['kwargs']['inputs'] = {
+            'input': workerUtils.girderInputSpec(
+                file,
+                resourceType='file',
+                token=userToken,
+                name='input' + itemExt,
+                dataType='string',
+                dataFormat='text'
+            )
+        }
+
+        job['kwargs']['outputs'] = dict(
+            (
+                'frame%d' % index,
+                workerUtils.girderOutputSpec(
+                    frames,
+                    parentType='folder',
+                    token=userToken,
+                    name='%d.png' % index,
+                    dataType='string',
+                    dataFormat='text',
+                    reference='videoPlugin:analysis:frame:%s:%d' % (
+                        str(id), index)
+                )
+            )
+            for index in range(numFrames)
+        )
+
+        job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
+            job=job,
+            token=jobToken,
+            logPrint=True)
+
+        job = jobModel.save(job)
+        jobModel.scheduleJob(job)
+
+        form['frameExtractionJobIds'] = (
+                form.get('frameExtractionJobIds', []) + [str(job['_id'])])
+        videodataModel.save(vData)
+
+        result = {
+            'video': {
+                'jobCreated': True,
+                'message': 'Frame extraction job created.'
+            }
+        }
+
+        result.update(job)
+        return result
 
 
     @autoDescribeRoute(
@@ -445,8 +599,12 @@ def createRoutes(file):
             # pass through
 
         # index guaranteed to not be None
-        frameFileId = formatData.get('frames')[index]
-        raise HTTPRedirect('api/v1/file/%s/download' % frameFileId)
+        frameList = formatData.get('frames', [])
+        if index < len(frameList):
+            frameFileId = frameList[index]
+            raise HTTPRedirect('api/v1/file/%s/download' % frameFileId)
+
+        raise RestException('Frame not found.', 404)
 
 
     @autoDescribeRoute(
@@ -467,6 +625,7 @@ def createRoutes(file):
         folderModel = self.model('folder')
         tokenModel = self.model('token')
         jobModel = self.model('job', 'jobs')
+        videodataModel = self.model('videodata', 'video')
 
         file = getFile(self, id)
         vData = getVideoData(self, file=file)
@@ -638,7 +797,7 @@ def createRoutes(file):
         jobModel.scheduleJob(job)
 
         form['jobId'] = str(job['_id'])
-        fileModel.save(file)
+        videodataModel.save(vData)
 
         result = {
             'video': {
@@ -662,17 +821,6 @@ def createRoutes(file):
     def deleteProcessedVideo(self, id, params):
         cancelResponse = cancelVideoJobs(self, id)
         removeResponse = removeVideoData(self, id)
-
-        return {
-            'message': 'Video processing jobs canceled.',
-            'fileId': id,
-            'canceledJobs': jobList
-        }
-        return {
-            'message': 'Processed video data deleted.',
-            'fileId': id,
-            'cacheFolderId': folder['_id'] if folder else None
-        }
 
         cancelResponse.pop('message', None)
         removeResponse.pop('message', None)
@@ -710,7 +858,7 @@ def createRoutes(file):
 
 
     @autoDescribeRoute(
-        Description('Add a new format for the given video.')
+        Description('Remove a format from the given video.')
         .param('id', 'Id of the file.', paramType='path')
         .param('name', 'Name for the new format.', paramType='path')
         .errorResponse()
@@ -721,8 +869,23 @@ def createRoutes(file):
     def deleteVideoFormat(params):
         pass
 
+    def wrap(fun):
+        @wraps(fun)
+        def result(*args, **kwds):
+            return fun(file, *args, **kwds)
+        return result
 
     return {
+        'utilities': {
+            'ensureVideoUser'  : wrap(ensureVideoUser),
+            'extractFrames'    : wrap(extractFrames),
+            'getFile'          : wrap(getFile),
+            'getVideoData'     : wrap(getVideoData),
+            'getVideoFormat'   : wrap(getVideoFormat),
+            'getCache'         : wrap(getCache),
+            'cancelVideoJobs'  : wrap(cancelVideoJobs),
+            'removeVideoData'  : wrap(removeVideoData),
+        },
         'getVideoMetadata'     : getVideoMetadata,
         'getVideoFormats'      : getVideoFormats,
         'getVideoFormatByName' : getVideoFormatByName,

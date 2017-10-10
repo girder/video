@@ -27,6 +27,8 @@ from girder.utility import setting_utilities
 from . import constants
 
 JobStatus = constants.JobStatus
+videoUtilities = None  # set at plugin load
+frameJobArgs = None  # nasty hack/abuse of events
 
 @setting_utilities.validator({
     'video.cacheId'
@@ -35,31 +37,94 @@ def validateSettings(doc):
     id = doc['value']
     pass
 
+def _onFrames(event):
+    global frameJobArgs
+    if frameJobArgs is not None:
+        sourceFileId = frameJobArgs.get('sourceFileId')
+        numFrames = frameJobArgs.get('numFrames')
+        user = frameJobArgs.get('currentUser')
+        frameJobArgs = None
+
+        videoUtilities['extractFrames'](sourceFileId, numFrames, user=user)
+
+def _deleteVideoData(event):
+    file = event.info
+    videodataModel = ModelImporter.model('videodata', 'video')
+    vData = videodataModel.findOne({ 'fileId': file['_id'] })
+    if vData:
+        videodataModel.remove(vData)
+
 def _postUpload(event):
     """
     Called when a file is uploaded. If the file was created by the video
-    plugin's initial processing job, we register this file as such.
+    plugin's processing jobs, they are handled here.
     """
+    global frameJobArgs
     reference = event.info.get('reference', '')
     if not reference.startswith('videoPlugin'):
         return
 
     if reference.startswith('videoPlugin:analysis:meta:'):
         fileModel = ModelImporter.model('file')
+        videodataModel = ModelImporter.model('videodata', 'video')
         sourceFileId = reference.split(':')[-1]
-        sourceFile = fileModel.load(
-            sourceFileId, level=AccessType.WRITE, user=event.info['user'])
+        vData = videoUtilities['getVideoData'](
+                id=sourceFileId,
+                level=AccessType.WRITE,
+                user=event.info['currentUser'])
 
-        vData = sourceFile.get('video', {})
-        sourceFile['video'] = vData
-
-        sourceFormat = vData.get('sourceFormat', {})
-        vData['sourceFormat'] = sourceFormat
+        sourceFormat = videoUtilities['getVideoFormat'](data=vData)
 
         with fileModel.open(event.info['file']) as f:
             sourceFormat['metadata'] = json.load(f)
 
-        fileModel.save(sourceFile)
+        videodataModel.save(vData)
+
+        numFrames = int(
+            sourceFormat
+                .get('metadata', {})
+                .get('video', {})
+                .get('frameCount', 0))
+
+        if numFrames:
+            frameJobArgs = {
+                'sourceFileId': sourceFileId,
+                'numFrames': numFrames,
+                'currentUser': event.info['currentUser']
+            }
+            events.daemon.trigger('frameExtract', 'video', None)
+
+    elif reference.startswith('videoPlugin:analysis:frame:'):
+        fileModel = ModelImporter.model('file')
+        videodataModel = ModelImporter.model('videodata', 'video')
+        tokens = reference.split(':')[3:]
+
+        sourceFileId = None
+        format = None
+        frameIndex = None
+
+        if len(tokens) == 2:
+            sourceFileId, frameIndex = tokens
+        else:
+            format, sourceFileId, frameIndex = tokens[:3]
+
+        frameIndex = int(frameIndex)
+
+        vData = videoUtilities['getVideoData'](
+                id=sourceFileId,
+                level=AccessType.WRITE,
+                user=event.info['currentUser'])
+
+        format = videoUtilities['getVideoFormat'](data=vData, name=format)
+        framelist = format.get('frames', [])
+        n = len(frameList)
+
+        if n <= frameIndex:
+            frameList.extend((frameIndex - n)*[None])
+            frameList.append(event.info['file']['_id'])
+
+        format['frames'] = frameList
+        videodataModel.save(vData)
 
 
 # Validators
@@ -141,12 +206,16 @@ SettingDefault.defaults.update({
     dependencies={'worker'},
 )
 def load(info):
+    global videoUtilities
     from .rest import addFileRoutes
 
-    addFileRoutes(info['apiRoot'].file)
+    routeTable = addFileRoutes(info['apiRoot'].file)
+    videoUtilities = routeTable['utilities']
 
     ModelImporter.model('file').exposeFields(
         level=AccessType.READ, fields='video')
 
     events.bind('data.process', 'video', _postUpload)
+    events.bind('model.file.remove', 'video', _deleteVideoData)
+    events.bind('frameExtract', 'video', _onFrames)
 
