@@ -124,6 +124,22 @@ def analyze_main(args):
     with open(os.path.join(GIRDER_WORKER_DIR, 'meta.json'), 'w') as f:
         f.write(meta_dump)
 
+
+def extract_main(args):
+    num_frames = int(args[0])
+    input_file = next(glob.iglob(os.path.join(GIRDER_WORKER_DIR, 'input.*')))
+
+    cmd = [
+        FFMPEG, '-i', input_file,
+        os.path.join(GIRDER_WORKER_DIR, '%d.png')
+    ]
+
+    sys.stdout.write(' '.join(('RUN:', repr(cmd))))
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+
+    subprocess.check_call(cmd)
+
 def transcode_main(args):
     input_file = next(glob.iglob(os.path.join(GIRDER_WORKER_DIR, 'input.*')))
 
@@ -259,16 +275,9 @@ if __name__ == '__main__':
     mode = sys.argv[1]
     args = sys.argv[2:]
 
-    try:
-        if mode == 'analyze':
-            analyze_main(args)
-    finally:
-        for fpath in (os.path.join(GIRDER_WORKER_DIR, 'meta.json'),
-                      os.path.join(GIRDER_WORKER_DIR, 'source.webm'),):
+    if mode == 'analyze':
+        analyze_main(args)
 
-            if os.path.exists(fpath):
-                continue
-
-            with open(fpath, 'w') as f:
-                pass # touch
+    if mode == 'extract':
+        extract_main(args)
 
