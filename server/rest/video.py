@@ -32,8 +32,23 @@ from girder.api.rest import filtermodel, RestException, \
 
 from girder.constants import AccessType, TokenScope
 from girder.plugins.worker import utils as workerUtils
+from girder.models.model_base import ValidationException
 
 from ..constants import JobStatus
+
+def debug(func):
+    @wraps(func)
+    def result(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except:
+            import sys, traceback
+            traceback.print_exc(file=sys.stdout)
+            traceback.print_stack(file=sys.stdout)
+            sys.stdout.flush()
+            raise
+
+    return result
 
 
 def addFileRoutes(file):
@@ -101,7 +116,10 @@ def createRoutes(file):
         result = self.model('file').load(id, user=user, level=level)
         return result
 
-    def getVideoData(self, id=None, file=None, user=None, level=None):
+
+    def getVideoData(
+            self, format=None, id=None, file=None,
+            user=None, level=None, ensure=False):
         videodataModel = self.model('videodata', 'video')
 
         if user is None:
@@ -113,36 +131,34 @@ def createRoutes(file):
         if file is None:
             file = getFile(self, id, user=user)
 
-        data = videodataModel.findOne({ 'fileId': file['_id'] })
+        data = None
+        if format is None:
+            data = videodataModel.findOne({
+                'fileId': file['_id'],
+                'sourceFileId': file['_id']
+            })
 
-        if not data:
-            data = videodataModel.createVideoData(file['_id'])
+            if not data and ensure:
+                data = videodataModel.createVideodata(fileId=file['_id'])
+        else:
+            data = videodataModel.findOne({
+                'sourceFileId': file['_id'],
+                'formatName': format
+            })
 
-        data = videodataModel.load(data['_id'], user=user, level=level)
+            if not data and ensure:
+                data = videodataModel.createVideodata(
+                    sourceFileId=file['_id'], formatName=format)
+
+        if data:
+            data = videodataModel.load(data['_id'], user=user, level=level)
 
         return data
 
 
-    def getVideoFormat(self, name=None, id=None, data=None):
-        if data is None:
-            data = getVideoData(self, id)
-
-        if name is None:
-            return data.get('sourceFormat', {})
-
-        formatList = data.get('formats', [])
-        for form in formatList:
-            if form['name'] == name:
-                return form
-
-        raise RestException(
-            'No such video format for file with id=%s' % id,
-            code=404)
-
-
     def getCache(self,
-            format=None, id=None, data=None, level=None, file=None,
-            ensure=False):
+            format=None, id=None, data=None,
+            level=None, file=None, ensure=False):
         fileModel = self.model('file')
         folderModel = self.model('folder')
         collectionModel = self.model('collection')
@@ -168,10 +184,12 @@ def createRoutes(file):
         # video identified: ensure the cache for the given format
 
         if file is None:
-            file = getFile(self, id)
+            file = getFile(self, id, user=cUser)
 
         if data is None:
-            data = getVideoData(self, file=file)
+            data = getVideoData(
+                self, file=file, user=cUser,
+                level=AccessType.WRITE, ensure=True)
 
         if format is None:  # no format identified: ensure the source cache
             cacheRoot = getCache(
@@ -202,14 +220,19 @@ def createRoutes(file):
                     folder = folderModel.setAccessList(
                             folder, acl, user=vUser, save=True, force=True)
 
-                    data['cacheId'] = str(folder['_id'])
+                    data['cacheId'] = folder['_id']
                     videodataModel.save(data)
-                    return folderModel.load(
+
+                    folder = folderModel.load(
                         folder['_id'], level=level, user=cUser)
 
             return folder
 
         # video and format identified: ensure the given cache entry
+
+        formatData = getVideoData(
+            self, format=format, file=file, user=cUser,
+            level=AccessType.WRITE, ensure=True)
 
         cache = getCache(
             self, format=None, id=id, data=data,
@@ -242,6 +265,10 @@ def createRoutes(file):
                         reuseExisting=True)['_id'],
                     level=level,
                     user=cUser)
+
+                formatData['cacheId'] = formatFolder['_id']
+                videodataModel.save(formatData)
+
             else:
                 formatsFolder = folderModel.findOne({
                     'parentId': cache['_id'], 'name': 'formats' })
@@ -258,71 +285,71 @@ def createRoutes(file):
 
 
     def cancelVideoJobs(self, id, format=None):
-        file = getFile(self, id)
-        vData = getVideoData(self, file=file)
-        fileModel = self.model('file')
+        videojobModel = self.model('videojob', 'video')
         jobModel = self.model('job', 'jobs')
-        videodataModel = self.model('videodata', 'video')
         cUser = getCurrentUser()
 
-        jobList = []
-        formats = []
-        if format is None:
-            formats.append(vData.get('sourceFormat'))
-            formats.extend(vData.get('formats', []))
-        else:
-            formats.append(getVideoFormat(self, name=format, data=vData))
+        canceledJobs = set()
+        query = (
+            { 'sourceFileId': ObjectId(id), 'formatName': format }
+            if format else
+            { '$or': [{ 'sourceFileId': ObjectId(id) },
+                      { 'fileId'      : ObjectId(id) }] }
+        )
 
-        for form in formats:
-            jobList.extend(form.pop('frameExtractionJobIds', []))
-            jobList.append(form.pop('jobId', None))
+        for vJob in videojobModel.find(query):
+            vJob = videojobModel.load(
+                vJob['_id'], level=AccessType.WRITE, user=cUser)
 
-        videodataModel.save(vData)
+            job = jobModel.load(
+                vJob['jobId'], level=AccessType.WRITE, user=cUser)
 
-        def filterJob(jid):
-            if jid:
-                job = jobModel.load(jid, level=AccessType.READ, user=cUser)
-                if job:
-                    jobModel.cancelJob(job)
-                    return True
-            return False
+            try:
+                jobModel.cancelJob(job)
+                canceledJobs.add(str(job['_id']))
+            except ValidationException:
+                pass
 
-        jobList = list(filter(filterJob, jobList))
+            videojobModel.remove(vJob)
 
         return {
             'message': 'Video processing jobs canceled.',
             'fileId': id,
-            'canceledJobs': jobList
+            'canceledJobs': list(canceledJobs)
         }
 
 
     def removeVideoData(self, id, format=None):
-        file = getFile(self, id)
-        vData = getVideoData(self, file=file)
-        fileModel = self.model('file')
         folderModel = self.model('folder')
         videodataModel = self.model('videodata', 'video')
+        videoframeModel = self.model('videoframe', 'video')
         cUser = getCurrentUser()
 
-        formats = []
-        if format is None:
-            formats.append(vData.get('sourceFormat'))
-            formats.extend(vData.get('formats', []))
-        else:
-            formats.append(getVideoFormat(self, name=format, data=vData))
+        query = (
+            { 'sourceFileId': ObjectId(id), 'formatName': format }
+            if format else
+            { '$or': [{ 'sourceFileId': ObjectId(id) },
+                      { 'fileId'      : ObjectId(id) }] }
+        )
 
-        for form in formats:
-            form.pop('fileId', None)
-            form.pop('frames', None)
+        for vFrame in videoframeModel.find(query):
+            vFrame = videoframeModel.load(
+                vFrame['_id'], level=AccessType.WRITE, user=cUser)
+            videoframeModel.remove(vFrame)
+
+        vData = getVideoData(
+            self, format=format, id=id, user=cUser,
+            level=AccessType.WRITE, ensure=False)
 
         folder = getCache(
-            self, format=format, id=id, data=vData,
-            level=AccessType.WRITE, file=file, ensure=False)
+            self, format=format, id=id,
+            data=vData, level=AccessType.WRITE, ensure=False)
 
         if folder:
             folderModel.remove(folder)
 
-        videodataModel.save(vData)
+            vData['cacheId'] = None
+            videodataModel.save(vData)
 
         return {
             'message': 'Processed video data deleted.',
@@ -341,11 +368,11 @@ def createRoutes(file):
         folderModel = self.model('folder')
         tokenModel = self.model('token')
         jobModel = self.model('job', 'jobs')
-        videodataModel = self.model('videodata', 'video')
+        videojobModel = self.model('videojob', 'video')
 
         file = getFile(self, id, user=user)
-        vData = getVideoData(self, file=file, user=user)
-        form = getVideoFormat(self, name=format, id=id, data=vData)
+        vData = getVideoData(
+            self, format=format, file=file, user=user, level=AccessType.READ)
 
         if not userToken:
             userToken = tokenModel.createToken(
@@ -441,9 +468,14 @@ def createRoutes(file):
         job = jobModel.save(job)
         jobModel.scheduleJob(job)
 
-        form['frameExtractionJobIds'] = (
-                form.get('frameExtractionJobIds', []) + [str(job['_id'])])
-        videodataModel.save(vData)
+        vJob = None
+        if format is not None:
+            vJob = videojobModel.createVideojob(
+                sourceFileId=id, type='frameExtraction',
+                formatName=format, jobId=job['_id'])
+        else:
+            vJob = videojobModel.createVideojob(
+                fileId=id, type='frameExtraction', jobId=job['_id'])
 
         result = {
             'video': {
@@ -467,9 +499,10 @@ def createRoutes(file):
     @access.public
     @boundHandler(file)
     def getVideoMetadata(self, id, params):
-        return (
-            getVideoFormat(self, name=params.get('format'), id=id)
-                .get('metadata', {}))
+        vData = getVideoData(
+            self, format=params.get('format'),
+            id=id, ensure=False, level=AccessType.READ)
+        return (vData or {}).get('metadata', {})
 
 
     @autoDescribeRoute(
@@ -481,7 +514,23 @@ def createRoutes(file):
     @access.public
     @boundHandler(file)
     def getVideoFormats(self, id, params):
-        return getVideoData(self, id).get('formats', [])
+        videodataModel = self.model('videodata', 'video')
+        user = getCurrentUser()
+
+        result = [
+            {
+                'name': x['formatName'],
+                'metadata': x['metadata']
+            }
+            for x in (
+                videodataModel.load(vData['_id'], level=AccessType.READ, user=user)
+                for vData in videodataModel.find(
+                    { 'sourceFileId': ObjectId(id) })
+            )
+            if str(x['fileId']) != str(x['sourceFileId'])
+        ]
+
+        return result
 
 
     @autoDescribeRoute(
@@ -495,11 +544,30 @@ def createRoutes(file):
     @access.public
     @boundHandler(file)
     def getVideoFormatByName(self, id, name, params):
-        return getVideoFormat(self, name=name, id=id)
+        videodataModel = self.model('videodata', 'video')
+        user = getCurrentUser()
+
+        result = videodataModel.load(
+            videodataModel.findOne({
+                'sourceFileId': ObjectId(id), 'formatName': name })['_id'],
+            level=AccessType.READ,
+            user=user
+        )
+
+        result = {
+            'name': result['formatName'],
+            'metadata': result['metadata']
+        }
+
+        return result
 
 
+    @access.cookie
+    @access.public(scope=TokenScope.DATA_READ)
     @autoDescribeRoute(
         Description('Return a specific video frame.')
+        .notes('This endpoint also accepts the HTTP "Range" '
+               'header for partial file downloads.')
         .param('id', 'Id of the file.', paramType='path')
         .param('format',
             'Name of the alternate video format.', required=False)
@@ -507,10 +575,20 @@ def createRoutes(file):
             'Portion of the video as a percentage (0-100).', required=False)
         .param('time',
             'Timestamp of the video in HH:MM:SS format.', required=False)
-        .param('index',
-            'Exact index of the desired frame.', required=False)
+        .param('index', 'Exact index of the desired frame.',
+            dataType='integer', required=False)
+        .param('offset', 'Forwarded to file/:id/download',
+               dataType='integer', required=False, default=0)
+        .param('endByte', 'Forwarded to file/:id/download',
+               dataType='integer', required=False)
+        .param('contentDisposition', 'Forwarded to file/:id/download',
+               required=False, enum=['inline', 'attachment'],
+               default='attachment')
+        .param('extraParameters', 'Forwarded to file/:id/download',
+               required=False)
         .errorResponse()
-        .errorResponse('Read access was denied on the file.', 403)
+        .errorResponse('ID was invalid.')
+        .errorResponse('Read access was denied on the parent folder.', 403)
         .errorResponse('No such video format.', 404)
         .errorResponse(
             'Missing metadata from format.', 400)
@@ -519,13 +597,15 @@ def createRoutes(file):
         .errorResponse(
             'Number of provided mutually-exclusive options != 1.', 400)
     )
-    @access.public
     @boundHandler(file)
     def getVideoFrame(self, id, params):
         format = params.get('format')
         percent = params.get('percent')
         time = params.get('time')
         index = params.get('index')
+
+        fileModel = self.model('file')
+        videoframeModel = self.model('videoframe', 'video')
 
         count = sum(x is not None for x in (percent, time, index))
 
@@ -534,19 +614,19 @@ def createRoutes(file):
                 'Must provide no more than one of either '
                 'percent, time, or index')
 
-        formatData = getVideoFormat(self, name=format, id=id)
+        vData = getVideoData(self, format=format, id=id, level=AccessType.READ)
 
         frameCount = None
         duration = None
         if percent is not None or time is not None:
-            frameCount = formatData.get('metadata', {}).get('frameCount')
+            frameCount = vData.get('metadata', {}).get('frameCount')
             if frameCount is None:
                 raise RestException('Missing metadata from format: frameCount')
 
             frameCount = int(frameCount)
 
             if time is not None:
-                duration = formatData.get('metadata', {}).get('duration')
+                duration = vData.get('metadata', {}).get('duration')
                 if duration is None:
                     raise RestException(
                         'Missing metadata from format: duration')
@@ -598,11 +678,39 @@ def createRoutes(file):
 
             # pass through
 
-        # index guaranteed to not be None
-        frameList = formatData.get('frames', [])
-        if index < len(frameList):
-            frameFileId = frameList[index]
-            raise HTTPRedirect('api/v1/file/%s/download' % frameFileId)
+        index = int(index)
+
+        query = (
+            { 'sourceFileId': ObjectId(id), 'formatName': format }
+            if format else
+            {
+                '$and': [
+                    { '$or': [{ 'sourceFileId': ObjectId(id) },
+                              { 'fileId'      : ObjectId(id) }] },
+                    { 'index': index }
+                ]
+            }
+        )
+
+        frame = videoframeModel.findOne(query)
+        if frame:
+            file = fileModel.findOne({ 'itemId': frame['itemId'] })
+            if file:
+                args = []
+                for key in ('offset', 'endByte',
+                        'contentDisposition', 'extraParameters'):
+                    val = params.get(key, None)
+                    if val is not None:
+                        args.append((key, str(val)))
+
+                args = '&'.join('='.join(arg) for arg in args)
+                if args:
+                    args = '?' + args
+
+                raise HTTPRedirect(
+                    ('/api/v1/file/%s/download/'
+                     '%d.png%s') % (
+                        str(file['_id']), index, args))
 
         raise RestException('Frame not found.', 404)
 
@@ -626,13 +734,14 @@ def createRoutes(file):
         tokenModel = self.model('token')
         jobModel = self.model('job', 'jobs')
         videodataModel = self.model('videodata', 'video')
+        videojobModel = self.model('videojob', 'video')
 
         file = getFile(self, id)
-        vData = getVideoData(self, file=file)
-        form = getVideoFormat(self, id=id, data=vData)
+        vData = getVideoData(self, file=file, ensure=True)
 
-        # TODO(opadron): check for vData['sourceFileId']
-        jobId = form.get('jobId')
+        vJob = videojobModel.findOne({
+            'type': 'analysis', 'fileId': ObjectId(id) })
+        jobId = (vJob or {}).get('jobId')
 
         itemAlreadyProcessed = False
         job = None
@@ -796,7 +905,9 @@ def createRoutes(file):
         job = jobModel.save(job)
         jobModel.scheduleJob(job)
 
-        form['jobId'] = str(job['_id'])
+        videojobModel.createVideojob(
+            fileId=id, type='analysis', jobId=job['_id'])
+
         videodataModel.save(vData)
 
         result = {
@@ -881,7 +992,6 @@ def createRoutes(file):
             'extractFrames'    : wrap(extractFrames),
             'getFile'          : wrap(getFile),
             'getVideoData'     : wrap(getVideoData),
-            'getVideoFormat'   : wrap(getVideoFormat),
             'getCache'         : wrap(getCache),
             'cancelVideoJobs'  : wrap(cancelVideoJobs),
             'removeVideoData'  : wrap(removeVideoData),
