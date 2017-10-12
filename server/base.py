@@ -17,7 +17,14 @@
 #  limitations under the License.
 #############################################################################
 
+try:
+    from queue import Queue
+except ImportError:  # PYTHON 2
+    from Queue import Queue
+
 import json
+
+from bson.objectid import ObjectId
 
 from girder import events, plugin, logger
 from girder.constants import AccessType, SettingDefault
@@ -26,9 +33,31 @@ from girder.utility import setting_utilities
 
 from . import constants
 
+def shout(x):
+    print('')
+    print(x)
+    print('')
+    import sys ; sys.stdout.flush()
+
+def debug(func):
+    from functools import wraps
+    @wraps(func)
+    def result(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except:
+            import sys, traceback
+            traceback.print_exc(file=sys.stdout)
+            traceback.print_stack(file=sys.stdout)
+            sys.stdout.flush()
+            raise
+
+    return result
+
 JobStatus = constants.JobStatus
 videoUtilities = None  # set at plugin load
-frameJobArgs = None  # nasty hack/abuse of events
+frameJobArgQueue = Queue()  # nasty hack/abuse of events
+analyzeJobArgQueue = Queue()  # nasty hack/abuse of events
 
 @setting_utilities.validator({
     'video.cacheId'
@@ -38,14 +67,15 @@ def validateSettings(doc):
     pass
 
 def _onFrames(event):
-    global frameJobArgs
-    if frameJobArgs is not None:
-        sourceFileId = frameJobArgs.get('sourceFileId')
-        numFrames = frameJobArgs.get('numFrames')
-        user = frameJobArgs.get('currentUser')
-        frameJobArgs = None
+    sourceFileId, numFrames, user, format = frameJobArgQueue.get()
+    videoUtilities['extractFrames'](
+        sourceFileId, numFrames, format=format, user=user)
 
-        videoUtilities['extractFrames'](sourceFileId, numFrames, user=user)
+@debug
+def _onAnalyze(event):
+    sourceFileId, user, format = analyzeJobArgQueue.get()
+    videoUtilities['analyzeVideo'](
+        sourceFileId, force=True, format=format, user=user)
 
 def _deleteVideoData(event):
     file = event.info
@@ -54,28 +84,41 @@ def _deleteVideoData(event):
     if vData:
         videodataModel.remove(vData)
 
+@debug
 def _postUpload(event):
     """
     Called when a file is uploaded. If the file was created by the video
     plugin's processing jobs, they are handled here.
     """
-    global frameJobArgs
     reference = event.info.get('reference', '')
     if not reference.startswith('videoPlugin'):
         return
 
-    if reference.startswith('videoPlugin:analysis:meta:'):
+    if reference.startswith('videoPlugin:analysis:'):
+        shout('ANALYSIS')
         fileModel = ModelImporter.model('file')
         videodataModel = ModelImporter.model('videodata', 'video')
-        sourceFileId = reference.split(':')[-1]
+        tokens = reference.split(':')[2:]
+
+        sourceFileId = None
+        format = None
+        if len(tokens) == 1:
+            sourceFileId = tokens[0]
+        else:
+            sourceFileId, format = tokens[:2]
+
+        shout('A')
         vData = videoUtilities['getVideoData'](
                 id=sourceFileId,
                 level=AccessType.WRITE,
+                format=format,
                 user=event.info['currentUser'])
 
+        shout('A')
         with fileModel.open(event.info['file']) as f:
             vData['metadata'] = json.load(f)
 
+        shout('A')
         videodataModel.save(vData)
 
         numFrames = int(
@@ -84,19 +127,17 @@ def _postUpload(event):
                 .get('video', {})
                 .get('frameCount', 0))
 
+        shout('A')
         if numFrames:
-            frameJobArgs = {
-                'sourceFileId': sourceFileId,
-                'numFrames': numFrames,
-                'currentUser': event.info['currentUser']
-            }
-            events.daemon.trigger('frameExtract', 'video', None)
+            frameJobArgQueue.put(
+                (sourceFileId, numFrames, event.info['currentUser'], format))
+            events.daemon.trigger('frameExtract', 'video', format)
 
-    elif reference.startswith('videoPlugin:analysis:frame:'):
+    elif reference.startswith('videoPlugin:frame:'):
         fileModel = ModelImporter.model('file')
         videodataModel = ModelImporter.model('videodata', 'video')
         videoframeModel = ModelImporter.model('videoframe', 'video')
-        tokens = reference.split(':')[3:]
+        tokens = reference.split(':')[2:]
 
         sourceFileId = None
         format = None
@@ -117,6 +158,42 @@ def _postUpload(event):
             videoframeModel.createVideoframe(
                 sourceFileId=sourceFileId, index=frameIndex, formatName=format,
                 itemId=event.info['file']['itemId'], save=True)
+
+    elif reference.startswith('videoPlugin:transcoding:'):
+        shout('TRANSCODING')
+        videodataModel = ModelImporter.model('videodata', 'video')
+        videojobModel = ModelImporter.model('videojob', 'video')
+        sourceFileId, format = reference.split(':')[2:]
+
+        vData = videoUtilities['getVideoData'](
+                id=sourceFileId,
+                level=AccessType.WRITE,
+                format=format,
+                user=event.info['currentUser'])
+
+        shout('T')
+        vJob = videojobModel.findOne({
+            'type': 'transcoding',
+            'sourceFileId': ObjectId(sourceFileId),
+            'formatName': format })
+
+        vJob = videojobModel.load(
+                vJob['_id'],
+                level=AccessType.WRITE,
+                user=event.info['currentUser'])
+
+        shout('T')
+        vJob['fileId'] = event.info['file']['_id']
+        videojobModel.save(vJob)
+
+        vData['fileId'] = event.info['file']['_id']
+        videodataModel.save(vData)
+
+        shout('T')
+        analyzeJobArgQueue.put(
+            (sourceFileId, event.info['currentUser'], format))
+
+        events.daemon.trigger('videoAnalyze', 'video', None)
 
 
 # Validators
@@ -210,4 +287,5 @@ def load(info):
     events.bind('data.process', 'video', _postUpload)
     events.bind('model.file.remove', 'video', _deleteVideoData)
     events.bind('frameExtract', 'video', _onFrames)
+    events.bind('videoAnalyze', 'video', _onAnalyze)
 
