@@ -143,133 +143,68 @@ def extract_main(args):
 def transcode_main(args):
     input_file = next(glob.iglob(os.path.join(GIRDER_WORKER_DIR, 'input.*')))
 
+    vCodec = None
+    aCodec = None
+    dimensions = None
+    asRate = None
+    abRate = None
+    vbRate = None
+
+    for i in range(0, len(args) - 1, 2):
+        code, value = args[i:i+2]
+        if   code == 'VCODEC':
+            vCodec = value
+        elif code == 'ACODEC':
+            aCodec = value
+        elif code == 'DIMENSIONS':
+            dimensions = value
+        elif code == 'ASRATE':
+            asRate = value
+        elif code == 'ABRATE':
+            abRate = value
+        elif code == 'VBRATE':
+            vbRate = value
+
+    fileExtension = args[-1]
+
     cmd = [FFMPEG, '-i', input_file]
-    sys.stdout.write(' '.join(('RUN:', repr(cmd))))
-    sys.stdout.write('\n')
-    sys.stdout.flush()
+    if dimensions:
+        # NOTE(opadron): There doesn't seem to be any difference between using
+        #                -s and -vf, so I just use them both.
+        cmd.extend(['-s', dimensions, '-vf', 'scale=%s' % dimensions])
 
-    proc = subprocess.Popen(
-            cmd,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            universal_newlines=True)
+    cmd.extend(['-quality', 'good', '-threads', '16'])
 
-    meta = {'audio': {}, 'video': {}}
-    for line in proc.stderr:
-        if RE_VIDEO_INFO.match(line) and not meta['video'].get('width'):
-            for part in line.split(',')[1:]:
-                if 'x' in part and not meta['video'].get('width'):
-                    meta['video']['width'] = int(
-                            part.split('x')[0].split()[-1].strip())
+    if vCodec:
+        cmd.extend([
+            '-c:v', ('libvpx-vp9' if vCodec == 'VP9' else
+                      vCodec)
+        ])
 
-                    meta['video']['height'] = int(
-                            part.strip().split('x')[1].split()[0].strip())
+    cmd.extend(['-crf', '5'])
 
-                elif ' fps' in part and not meta['video'].get('frameRate'):
-                    meta['video']['frameRate'] = float(
-                            part.split(' fps')[0].strip())
+    if vbRate:
+        cmd.extend(['-b:v', vbRate])
 
-                elif ' kb/s' in part and not meta['video'].get('bitRate'):
-                    meta['video']['bitRate'] = float(
-                            part.split(' kb/s')[0].strip())
+    if aCodec:
+        cmd.extend([
+            '-c:a', ('libopus' if aCodec == 'OPUS' else
+                     aCodec)
+        ])
 
-        if RE_AUDIO_INFO.match(line) and not meta['audio'].get('bitRate'):
-            for part in line.split(',')[1:]:
-                if ' kb/s' in part and not meta['audio'].get('bitRate'):
-                    meta['audio']['bitRate'] = float(
-                            part.split(' kb/s')[0].strip())
+    if asRate:
+        cmd.extend(['-ar', asRate])
 
-                elif ' Hz' in part and not meta['audio'].get('sampleRate'):
-                    meta['audio']['sampleRate'] = (
-                            float(part.split(' Hz')[0].strip()))
+    if abRate:
+        cmd.extend(['-b:a', abRate])
 
-        if RE_DURATION_INFO.match(line) and not meta.get('duration'):
-            meta['duration'] = duration_parse(
-                    line.split("Duration:", 1)[1].split(",")[0])
-
-    proc.stderr.close()
-    check_exit_code([proc.wait(), 0][1], cmd)
-
-    cmd.extend(['-vcodec', 'copy', '-an', '-f', 'null', 'null'])
-    sys.stdout.write(' '.join(('RUN:', repr(cmd))))
-    sys.stdout.write('\n')
-    sys.stdout.flush()
-
-    proc = subprocess.Popen(
-            cmd,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            universal_newlines=True)
-
-    calcdur = None
-    calcframe = None
-
-    for line in proc.stderr:
-        if line.startswith('frame=') and ' time=' in line:
-            calcframe = int(line.split("frame=")[1].split()[0])
-            calcdur = duration_parse(line.split(" time=")[1].split()[0])
-
-    fps = 1
-    if calcdur:
-        meta['duration'] = calcdur
-        meta['video']['frameCount'] = calcframe
-
-        fps = float(calcframe)/calcdur
-        meta['video']['frameRate'] = fps
-        fps = int(fps + 0.5)
-
-    proc.stderr.close()
-    check_exit_code([proc.wait(), 0][1], cmd)
-
-    # TODO(opadron): work out multiple quality versions (-crf 30).
-    cmd = [
-        FFMPEG, '-i', input_file, '-vf', 'scale=640x480', '-quality', 'good',
-        '-threads', '16', '-c:v', 'libvpx-vp9', '-crf', '5',
-        '-b:v', '1000k', '-g', str(fps), '-c:a', 'libopus',
-        os.path.join(GIRDER_WORKER_DIR, 'source.webm')]
+    cmd.append(os.path.join(GIRDER_WORKER_DIR, 'output.%s' % fileExtension))
 
     sys.stdout.write(' '.join(('RUN:', repr(cmd))))
     sys.stdout.write('\n')
     sys.stdout.flush()
 
-    meta_dump = json.dumps(meta, indent=2)
-    with open(os.path.join(GIRDER_WORKER_DIR, '.girder_progress'), 'w') as prog:
-        proc = subprocess.Popen(
-                cmd,
-                stderr=subprocess.PIPE,
-                universal_newlines=True)
-
-        total = int(calcframe + len(meta_dump))
-        for line in proc.stderr:
-            if calcdur:
-                m = RE_PROGRESS_INFO.match(line)
-                if m:
-                    progress_update = {
-                        'message': 'transcoding video...',
-                        'total': total,
-                        'current': int(m.group(1).strip())
-                    }
-
-                    json.dump(progress_update, prog)
-                    prog.flush()
-
-            sys.stderr.write(line)
-            sys.stderr.flush()
-
-        proc.stderr.close()
-        check_exit_code([proc.wait(), 0][1], cmd)
-
-        progress_update = {
-            'message': 'writing metadata...',
-            'total': total,
-            'current': total
-        }
-
-        json.dump(progress_update, prog)
-        prog.flush()
-
-        with open(os.path.join(GIRDER_WORKER_DIR, 'meta.json'), 'w') as f:
-            f.write(meta_dump)
+    subprocess.check_call(cmd)
 
 if __name__ == '__main__':
     mode = sys.argv[1]
@@ -280,4 +215,7 @@ if __name__ == '__main__':
 
     if mode == 'extract':
         extract_main(args)
+
+    if mode == 'transcode':
+        transcode_main(args)
 
