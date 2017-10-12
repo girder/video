@@ -2,34 +2,41 @@
 from girder.constants import AccessType
 from girder.models.model_base import AccessControlledModel, ModelImporter
 
+from ..utils import objectIdOrNone
+
 
 class Videodata(AccessControlledModel):
     def initialize(self):
         self.name = 'videodata'
-        self.ensureIndices(['fileId'])
+        self.ensureIndices(['fileId', 'sourceFileId'])
 
         self.exposeFields(level=AccessType.READ, fields={
-            '_id', 'fileId', 'sourceFileId', 'cacheId',
-            'sourceFormat', 'formats', 'userId'})
+            '_id', 'fileId', 'sourceFileId',
+            'formatName', 'cacheId', 'metadata'})
 
     def validate(self, data):
         return data
 
-    def createVideoData(self, fileId, save=True):
+    def createVideodata(
+            self, fileId=None, sourceFileId=None, formatName=None,
+            cacheId=None, metadata=None, save=True):
+
         videodata = {
-            'fileId': fileId,
-            'sourceFileId': None,
-            'sourceFormat': {},
-            'formats': [],
+            'fileId': objectIdOrNone(fileId),
+            'sourceFileId': objectIdOrNone(sourceFileId or fileId),
+            'formatName': formatName,
+            'cacheId': objectIdOrNone(cacheId),
+            'metadata': (metadata or {})
         }
 
         file = ModelImporter.model('file').load(
-                fileId, level=AccessType.READ)
+                (sourceFileId or fileId), level=AccessType.READ)
+
         user = ModelImporter.model('user').load(
                 file['creatorId'], level=AccessType.READ)
 
         if user:
-            videodata['userId'] = user['_id']
+            videodata['userId'] = objectIdOrNone(user['_id'])
             self.setUserAccess(videodata, user=user, level=AccessType.WRITE)
         else:
             videodata['userId'] = None

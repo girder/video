@@ -73,15 +73,13 @@ def _postUpload(event):
                 level=AccessType.WRITE,
                 user=event.info['currentUser'])
 
-        sourceFormat = videoUtilities['getVideoFormat'](data=vData)
-
         with fileModel.open(event.info['file']) as f:
-            sourceFormat['metadata'] = json.load(f)
+            vData['metadata'] = json.load(f)
 
         videodataModel.save(vData)
 
         numFrames = int(
-            sourceFormat
+            vData
                 .get('metadata', {})
                 .get('video', {})
                 .get('frameCount', 0))
@@ -97,6 +95,7 @@ def _postUpload(event):
     elif reference.startswith('videoPlugin:analysis:frame:'):
         fileModel = ModelImporter.model('file')
         videodataModel = ModelImporter.model('videodata', 'video')
+        videoframeModel = ModelImporter.model('videoframe', 'video')
         tokens = reference.split(':')[3:]
 
         sourceFileId = None
@@ -110,21 +109,14 @@ def _postUpload(event):
 
         frameIndex = int(frameIndex)
 
-        vData = videoUtilities['getVideoData'](
-                id=sourceFileId,
-                level=AccessType.WRITE,
-                user=event.info['currentUser'])
-
-        format = videoUtilities['getVideoFormat'](data=vData, name=format)
-        framelist = format.get('frames', [])
-        n = len(frameList)
-
-        if n <= frameIndex:
-            frameList.extend((frameIndex - n)*[None])
-            frameList.append(event.info['file']['_id'])
-
-        format['frames'] = frameList
-        videodataModel.save(vData)
+        if format is None:
+            videoframeModel.createVideoframe(
+                fileId=sourceFileId, index=frameIndex,
+                itemId=event.info['file']['itemId'], save=True)
+        else:
+            videoframeModel.createVideoframe(
+                sourceFileId=sourceFileId, index=frameIndex, formatName=format,
+                itemId=event.info['file']['itemId'], save=True)
 
 
 # Validators
