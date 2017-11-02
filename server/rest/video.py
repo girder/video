@@ -19,12 +19,6 @@
 
 import os.path
 
-def shout(x):
-    print('')
-    print(x)
-    print('')
-    import sys ; sys.stdout.flush()
-
 from functools import wraps
 
 from cherrypy import HTTPRedirect
@@ -42,20 +36,6 @@ from girder.plugins.worker import utils as workerUtils
 from girder.models.model_base import ValidationException
 
 from ..constants import JobStatus
-
-def debug(func):
-    @wraps(func)
-    def result(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except:
-            import sys, traceback
-            traceback.print_exc(file=sys.stdout)
-            traceback.print_stack(file=sys.stdout)
-            sys.stdout.flush()
-            raise
-
-    return result
 
 
 def addFileRoutes(file):
@@ -401,15 +381,9 @@ def createRoutes(file):
         vData = getVideoData(
             self, file=file, format=format, user=user, ensure=True)
 
-        shout('VDATA')
-        shout(vData)
-
         vJob = videojobModel.findOne({
             'type': 'analysis', 'fileId': vData['fileId'],
             'sourceFileId': vData['sourceFileId'] })
-
-        shout('VJOB')
-        shout(vJob)
 
         jobId = (vJob or {}).get('jobId')
 
@@ -454,9 +428,6 @@ def createRoutes(file):
             level=AccessType.WRITE, file=file, ensure=True)
 
         targetFile = getFile(self, vData['fileId'], user=user)
-        shout('TARGET FILE')
-        shout(targetFile)
-        shout(user)
         analysis = folderModel.createFolder(
             parent=cache,
             name='analysis',
@@ -482,7 +453,6 @@ def createRoutes(file):
             # TODO(opadron): replace this once we have a maintained
             #                image on dockerhub
             'docker_image': 'ffmpeg_local',
-            'progress_pipe': True,
             'pull_image': False,
             'container_args': ['analyze'],
             'inputs': [
@@ -494,18 +464,6 @@ def createRoutes(file):
                 }
             ],
             'outputs': [
-                {
-                    'id': '_stdout',
-                    'type': 'string',
-                    'format': 'text',
-                    'target': 'memory'
-                },
-                {
-                    'id': '_stderr',
-                    'type': 'string',
-                    'format': 'text',
-                    'target': 'memory'
-                },
                 {
                     'id': 'meta',
                     'type:': 'string',
@@ -530,22 +488,6 @@ def createRoutes(file):
         }
 
         job['kwargs']['outputs'] = {
-            '_stdout': workerUtils.girderOutputSpec(
-                analysis,
-                parentType='folder',
-                token=userToken,
-                name='stdout.txt',
-                dataType='string',
-                dataFormat='text'
-            ),
-            '_stderr': workerUtils.girderOutputSpec(
-                analysis,
-                parentType='folder',
-                token=userToken,
-                name='stderr.txt',
-                dataType='string',
-                dataFormat='text'
-            ),
             'meta': workerUtils.girderOutputSpec(
                 analysis,
                 parentType='folder',
@@ -645,7 +587,6 @@ def createRoutes(file):
             # TODO(opadron): replace this once we have a maintained
             #                image on dockerhub
             'docker_image': 'ffmpeg_local',
-            'progress_pipe': True,
             'pull_image': False,
             'container_args': ['extract', str(numFrames)],
             'inputs': [
@@ -771,7 +712,8 @@ def createRoutes(file):
         .errorResponse('Read access was denied on the file.', 403)
         .errorResponse('No such video format.', 404)
     )
-    @access.public
+    @access.cookie
+    @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def getVideo(self, id, params):
         fileModel = self.model('file')
@@ -788,19 +730,9 @@ def createRoutes(file):
 
         targetFile = getFile(self, vData['fileId'])
 
-        args = []
-        for key in ('offset', 'endByte',
-                'contentDisposition', 'extraParameters'):
-            val = params.get(key, None)
-            if val is not None:
-                args.append((key, str(val)))
-
-        args = '&'.join('='.join(arg) for arg in args)
-        if args:
-            args = '?' + args
-
-        raise HTTPRedirect(
-            '/api/v1/file/%s/download%s' % (str(targetFile['_id']), args))
+        return self.download(id=str(targetFile['_id']), params=dict(
+            item for item in params.items() if item[1] is not None
+        ))
 
 
     @autoDescribeRoute(
@@ -809,7 +741,8 @@ def createRoutes(file):
         .errorResponse()
         .errorResponse('Read access was denied on the file.', 403)
     )
-    @access.public
+    @access.cookie
+    @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def getVideoFormats(self, id, params):
         videodataModel = self.model('videodata', 'video')
@@ -838,7 +771,8 @@ def createRoutes(file):
         .errorResponse('Read access was denied on the file.', 403)
         .errorResponse('No such video format.', 404)
     )
-    @access.public
+    @access.cookie
+    @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def getSourceVideoFormat(self, id, params):
         return _getVideoFormatByName(self, id, None, params)
@@ -852,14 +786,13 @@ def createRoutes(file):
         .errorResponse('Read access was denied on the file.', 403)
         .errorResponse('No such video format.', 404)
     )
-    @access.public
+    @access.cookie
+    @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def getVideoFormatByName(self, id, name, params):
         return _getVideoFormatByName(self, id, name, params)
 
 
-    @access.cookie
-    @access.public(scope=TokenScope.DATA_READ)
     @autoDescribeRoute(
         Description('Return a specific video frame.')
         .notes('This endpoint also accepts the HTTP "Range" '
@@ -893,6 +826,8 @@ def createRoutes(file):
         .errorResponse(
             'Number of provided mutually-exclusive options != 1.', 400)
     )
+    @access.cookie
+    @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def getVideoFrame(self, id, params):
         format = params.get('format')
@@ -998,21 +933,9 @@ def createRoutes(file):
         if frame:
             file = fileModel.findOne({ 'itemId': frame['itemId'] })
             if file:
-                args = []
-                for key in ('offset', 'endByte',
-                        'contentDisposition', 'extraParameters'):
-                    val = params.get(key, None)
-                    if val is not None:
-                        args.append((key, str(val)))
-
-                args = '&'.join('='.join(arg) for arg in args)
-                if args:
-                    args = '?' + args
-
-                raise HTTPRedirect(
-                    ('/api/v1/file/%s/download/'
-                     '%d.png%s') % (
-                        str(file['_id']), index, args))
+                return self.download(id=str(file['_id']), params=dict(
+                    item for item in params.items() if item[1] is not None
+                ))
 
         raise RestException('Frame not found.', 404)
 
@@ -1202,7 +1125,6 @@ def createRoutes(file):
             # TODO(opadron): replace this once we have a maintained
             #                image on dockerhub
             'docker_image': 'ffmpeg_local',
-            'progress_pipe': True,
             'pull_image': False,
             'container_args': container_args + [fileExtension],
             'inputs': [
