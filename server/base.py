@@ -17,7 +17,14 @@
 #  limitations under the License.
 #############################################################################
 
+try:
+    from queue import Queue
+except ImportError:  # PYTHON 2
+    from Queue import Queue
+
 import json
+
+from bson.objectid import ObjectId
 
 from girder import events, plugin, logger
 from girder.constants import AccessType, SettingDefault
@@ -27,137 +34,134 @@ from girder.utility import setting_utilities
 from . import constants
 
 JobStatus = constants.JobStatus
+videoUtilities = None  # set at plugin load
+frameJobArgQueue = Queue()  # nasty hack/abuse of events
+analyzeJobArgQueue = Queue()  # nasty hack/abuse of events
 
+@setting_utilities.validator({
+    'video.cacheId'
+})
+def validateSettings(doc):
+    id = doc['value']
+    pass
+
+def _onFrames(event):
+    sourceFileId, numFrames, user, format = frameJobArgQueue.get()
+    videoUtilities['extractFrames'](
+        sourceFileId, numFrames, format=format, user=user)
+
+def _onAnalyze(event):
+    sourceFileId, user, format = analyzeJobArgQueue.get()
+    videoUtilities['analyzeVideo'](
+        sourceFileId, force=True, format=format, user=user)
+
+def _deleteVideoData(event):
+    file = event.info
+    videodataModel = ModelImporter.model('videodata', 'video')
+    vData = videodataModel.findOne({ 'fileId': file['_id'] })
+    if vData:
+        videodataModel.remove(vData)
 
 def _postUpload(event):
     """
     Called when a file is uploaded. If the file was created by the video
-    plugin's initial processing job, we register this file as such.
+    plugin's processing jobs, they are handled here.
     """
-    reference = event.info.get('reference')
-    if reference != 'videoPlugin':
+    reference = event.info.get('reference', '')
+    if not reference.startswith('videoPlugin'):
         return
 
-    file = event.info['file']
-    itemModel = ModelImporter.model('item')
+    if reference.startswith('videoPlugin:analysis:'):
+        fileModel = ModelImporter.model('file')
+        videodataModel = ModelImporter.model('videodata', 'video')
+        tokens = reference.split(':')[2:]
 
-    item = itemModel.load(file['itemId'], force=True, exc=True)
-    itemVideoData = item.get('video', {})
-    createdFiles = set(itemVideoData.get('createdFiles', []))
+        sourceFileId = None
+        format = None
+        if len(tokens) == 1:
+            sourceFileId = tokens[0]
+        else:
+            sourceFileId, format = tokens[:2]
 
-    createdFiles.add(str(file['_id']))
+        vData = videoUtilities['getVideoData'](
+                id=sourceFileId,
+                level=AccessType.WRITE,
+                format=format,
+                user=event.info['currentUser'])
 
-    itemVideoData['createdFiles'] = list(createdFiles)
-    item['video'] = itemVideoData
+        with fileModel.open(event.info['file']) as f:
+            vData['metadata'] = json.load(f)
 
-    itemModel.save(item)
+        videodataModel.save(vData)
 
+        numFrames = int(
+            vData
+                .get('metadata', {})
+                .get('video', {})
+                .get('frameCount', 0))
 
-def updateJob(event):
-    """
-    Called when a job is saved, updated, or removed.  If this is a video
-    job and it is ended, clean up after it.
-    """
-    global JobStatus
-    if not JobStatus:
-        from girder.plugins.jobs.constants import JobStatus
+        if numFrames:
+            frameJobArgQueue.put(
+                (sourceFileId, numFrames, event.info['currentUser'], format))
+            events.daemon.trigger('frameExtract', 'video', format)
 
-    job = (
-        event.info['job']
-        if event.name == 'jobs.job.update.after'
-        else event.info
-    )
+    elif reference.startswith('videoPlugin:frame:'):
+        fileModel = ModelImporter.model('file')
+        videodataModel = ModelImporter.model('videodata', 'video')
+        videoframeModel = ModelImporter.model('videoframe', 'video')
+        tokens = reference.split(':')[2:]
 
-    jobVideoData = job.get('meta', {}).get('video_plugin')
-    if jobVideoData is None:
-        return
+        sourceFileId = None
+        format = None
+        frameIndex = None
 
-    videoItemId = jobVideoData.get('itemId')
-    videoFileId = jobVideoData.get('fileId')
-    if videoItemId is None or videoFileId is None:
-        return
+        if len(tokens) == 2:
+            sourceFileId, frameIndex = tokens
+        else:
+            format, sourceFileId, frameIndex = tokens[:3]
 
-    status = job['status']
-    if event.name == 'model.job.remove' and status not in (
-            JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
-        status = JobStatus.CANCELED
-    if status not in (JobStatus.ERROR, JobStatus.CANCELED, JobStatus.SUCCESS):
-        return
+        frameIndex = int(frameIndex)
 
-    item = ModelImporter.model('item').load(videoItemId, force=True)
-    if not item:
-        return
+        if format is None:
+            videoframeModel.createVideoframe(
+                fileId=sourceFileId, index=frameIndex,
+                itemId=event.info['file']['itemId'], save=True)
+        else:
+            videoframeModel.createVideoframe(
+                sourceFileId=sourceFileId, index=frameIndex, formatName=format,
+                itemId=event.info['file']['itemId'], save=True)
 
-    itemVideoData = item.get('video')
-    if itemVideoData is None:
-        return
+    elif reference.startswith('videoPlugin:transcoding:'):
+        videodataModel = ModelImporter.model('videodata', 'video')
+        videojobModel = ModelImporter.model('videojob', 'video')
+        sourceFileId, format = reference.split(':')[2:]
 
-    if itemVideoData['jobId'] != str(job['_id']):
-        return
+        vData = videoUtilities['getVideoData'](
+                id=sourceFileId,
+                level=AccessType.WRITE,
+                format=format,
+                user=event.info['currentUser'])
 
-    # TODO(opadron): remove this after this section is finished
-    print(
-        'Found video item %s from job %s' %
-        (videoItemId, str(job['_id'])))
+        vJob = videojobModel.findOne({
+            'type': 'transcoding',
+            'sourceFileId': ObjectId(sourceFileId),
+            'formatName': format })
 
-    # if item.get('largeImage', {}).get('expected'):
-    #     # We can get a SUCCESS message before we get the upload message, so
-    #     # don't clear the expected status on success.
-    #     if status != JobStatus.SUCCESS:
-    #         del item['largeImage']['expected']
+        vJob = videojobModel.load(
+                vJob['_id'],
+                level=AccessType.WRITE,
+                user=event.info['currentUser'])
 
-    # notify = item.get('largeImage', {}).get('notify')
-    # msg = None
-    # if notify:
-    #     del item['largeImage']['notify']
-    #     if status == JobStatus.SUCCESS:
-    #         msg = 'Large image created'
-    #     elif status == JobStatus.CANCELED:
-    #         msg = 'Large image creation canceled'
-    #     else:  # ERROR
-    #         msg = 'FAILED: Large image creation failed'
-    #     msg += ' for item %s' % item['name']
-    # if (status in (JobStatus.ERROR, JobStatus.CANCELED) and
-    #         'largeImage' in item):
-    #     del item['largeImage']
+        vJob['fileId'] = event.info['file']['_id']
+        videojobModel.save(vJob)
 
-    # ModelImporter.model('item').save(item)
-    # if msg and event.name != 'model.job.remove':
-    #     ModelImporter.model('job', 'jobs').updateJob(job, progressMessage=msg)
+        vData['fileId'] = event.info['file']['_id']
+        videodataModel.save(vData)
 
+        analyzeJobArgQueue.put(
+            (sourceFileId, event.info['currentUser'], format))
 
-def checkForLargeImageFiles(event):
-    pass
-    ## file = event.info
-    ## possible = False
-    ## mimeType = file.get('mimeType')
-    ## if mimeType in ('image/tiff', 'image/x-tiff', 'image/x-ptif'):
-    ##     possible = True
-    ## exts = file.get('exts')
-    ## if exts and exts[-1] in ('svs', 'ptif', 'tif', 'tiff', 'ndpi'):
-    ##     possible = True
-    ## if not file.get('itemId') or not possible:
-    ##     return
-    ## if not ModelImporter.model('setting').get(
-    ##         constants.PluginSettings.LARGE_IMAGE_AUTO_SET):
-    ##     return
-    ## item = ModelImporter.model('item').load(
-    ##     file['itemId'], force=True, exc=False)
-    ## if not item or item.get('largeImage'):
-    ##     return
-    ## imageItemModel = ModelImporter.model('image_item', 'large_image')
-    ## try:
-    ##     imageItemModel.createImageItem(item, file, createJob=False)
-    ## except Exception:
-    ##     # We couldn't automatically set this as a large image
-    ##     logger.info('Saved file %s cannot be automatically used as a '
-    ##                 'largeImage' % str(file['_id']))
-
-
-def removeThumbnails(event):
-    pass
-    ## ModelImporter.model('image_item', 'large_image').removeThumbnailFiles(
-    ##     event.info)
+        events.daemon.trigger('videoAnalyze', 'video', None)
 
 
 # Validators
@@ -235,26 +239,21 @@ SettingDefault.defaults.update({
 @plugin.config(
     name='Video',
     description='Process, serve, and display videos.',
-    version='0.1.0',
+    version='0.2.0',
     dependencies={'worker'},
 )
 def load(info):
-    from .rest import addItemRoutes
+    global videoUtilities
+    from .rest import addFileRoutes
 
-    addItemRoutes(info['apiRoot'].item)
+    routeTable = addFileRoutes(info['apiRoot'].file)
+    videoUtilities = routeTable['utilities']
 
-    ModelImporter.model('item').exposeFields(
+    ModelImporter.model('file').exposeFields(
         level=AccessType.READ, fields='video')
 
     events.bind('data.process', 'video', _postUpload)
-    events.bind('jobs.job.update.after', 'video', updateJob)
-    events.bind('model.job.save', 'video', updateJob)
-    events.bind('model.job.remove', 'video', updateJob)
-    ## events.bind('model.folder.save.after', 'video',
-    ##             invalidateLoadModelCache)
-    ## events.bind('model.group.save.after', 'video',
-    ##             invalidateLoadModelCache)
-    ## events.bind('model.item.remove', 'video', invalidateLoadModelCache)
-    events.bind('model.file.save.after', 'video',
-                checkForLargeImageFiles)
-    events.bind('model.item.remove', 'video', removeThumbnails)
+    events.bind('model.file.remove', 'video', _deleteVideoData)
+    events.bind('frameExtract', 'video', _onFrames)
+    events.bind('videoAnalyze', 'video', _onAnalyze)
+
