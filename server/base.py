@@ -33,27 +33,6 @@ from girder.utility import setting_utilities
 
 from . import constants
 
-def shout(x):
-    print('')
-    print(x)
-    print('')
-    import sys ; sys.stdout.flush()
-
-def debug(func):
-    from functools import wraps
-    @wraps(func)
-    def result(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except:
-            import sys, traceback
-            traceback.print_exc(file=sys.stdout)
-            traceback.print_stack(file=sys.stdout)
-            sys.stdout.flush()
-            raise
-
-    return result
-
 JobStatus = constants.JobStatus
 videoUtilities = None  # set at plugin load
 frameJobArgQueue = Queue()  # nasty hack/abuse of events
@@ -71,7 +50,6 @@ def _onFrames(event):
     videoUtilities['extractFrames'](
         sourceFileId, numFrames, format=format, user=user)
 
-@debug
 def _onAnalyze(event):
     sourceFileId, user, format = analyzeJobArgQueue.get()
     videoUtilities['analyzeVideo'](
@@ -84,7 +62,6 @@ def _deleteVideoData(event):
     if vData:
         videodataModel.remove(vData)
 
-@debug
 def _postUpload(event):
     """
     Called when a file is uploaded. If the file was created by the video
@@ -95,7 +72,6 @@ def _postUpload(event):
         return
 
     if reference.startswith('videoPlugin:analysis:'):
-        shout('ANALYSIS')
         fileModel = ModelImporter.model('file')
         videodataModel = ModelImporter.model('videodata', 'video')
         tokens = reference.split(':')[2:]
@@ -107,18 +83,15 @@ def _postUpload(event):
         else:
             sourceFileId, format = tokens[:2]
 
-        shout('A')
         vData = videoUtilities['getVideoData'](
                 id=sourceFileId,
                 level=AccessType.WRITE,
                 format=format,
                 user=event.info['currentUser'])
 
-        shout('A')
         with fileModel.open(event.info['file']) as f:
             vData['metadata'] = json.load(f)
 
-        shout('A')
         videodataModel.save(vData)
 
         numFrames = int(
@@ -127,7 +100,6 @@ def _postUpload(event):
                 .get('video', {})
                 .get('frameCount', 0))
 
-        shout('A')
         if numFrames:
             frameJobArgQueue.put(
                 (sourceFileId, numFrames, event.info['currentUser'], format))
@@ -160,7 +132,6 @@ def _postUpload(event):
                 itemId=event.info['file']['itemId'], save=True)
 
     elif reference.startswith('videoPlugin:transcoding:'):
-        shout('TRANSCODING')
         videodataModel = ModelImporter.model('videodata', 'video')
         videojobModel = ModelImporter.model('videojob', 'video')
         sourceFileId, format = reference.split(':')[2:]
@@ -171,7 +142,6 @@ def _postUpload(event):
                 format=format,
                 user=event.info['currentUser'])
 
-        shout('T')
         vJob = videojobModel.findOne({
             'type': 'transcoding',
             'sourceFileId': ObjectId(sourceFileId),
@@ -182,14 +152,12 @@ def _postUpload(event):
                 level=AccessType.WRITE,
                 user=event.info['currentUser'])
 
-        shout('T')
         vJob['fileId'] = event.info['file']['_id']
         videojobModel.save(vJob)
 
         vData['fileId'] = event.info['file']['_id']
         videodataModel.save(vData)
 
-        shout('T')
         analyzeJobArgQueue.put(
             (sourceFileId, event.info['currentUser'], format))
 
