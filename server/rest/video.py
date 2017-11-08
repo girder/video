@@ -22,8 +22,6 @@ import os.path
 
 from functools import wraps
 
-from cherrypy import HTTPRedirect
-
 from bson.objectid import ObjectId
 
 from girder import logger
@@ -36,10 +34,55 @@ from girder.constants import AccessType, TokenScope
 from girder.plugins.worker import utils as workerUtils
 from girder.models.model_base import ValidationException
 
-from ..constants import JobStatus, VideoEnum, VideoEnum
+from ..constants import JobStatus, VideoEnum
 
 
 ### BEGIN HELPER FUNCTIONS     TODO - Refactor
+def resolveFileId(self, fileId, formatId=None, formatName=None):
+    videoModel = self.model('video', 'video')
+
+    fileId = ObjectId(fileId)
+
+    if not formatId and formatName:
+        formatId = _getVideoFormatByName(self, formatName)['_id']
+    else:
+        formatId = ObjectId(formatId) if formatId else None
+
+    isFile = { 'type': VideoEnum.FILE }
+    isFrame = { 'type': VideoEnum.FRAME }
+    isData = { '$or': [isFile, isFrame] }
+
+    matchesSource = { 'sourceFileId': fileId }
+    notMatchesSource = { 'sourceFileId': { '$ne': fileId } }
+    matchesFile = { 'fileId': fileId }
+    matchesFormat = { 'formatId': formatId }
+
+    # first, check to see if fileId refers to a file created by the plugin
+    data = videoModel.findOne({'$and': [
+        isData,
+        notMatchesSource,
+        matchesFile
+    ]})
+
+    if data:
+        # if it is, and it's a FRAME, bail, completely (users should not be
+        # handing the plugin the fileIds of its own generated frames).
+        if data['type'] == VideoEnum.FRAME:
+            return None, None, None
+
+        # if it is a FILE, then ignore the formatId provided in the call
+        return data['sourceFileId'], fileId, data['formatId']
+
+    # if we get this far, then the provided fileId can only be a sourceFileId
+    data = videoModel.findOne({'$and': [
+        isFile,
+        matchesSource,
+        matchesFormat
+    ]})
+
+    return fileId, (data or {}).get('fileId'), formatId
+
+
 def getFile(self, id, user=None, level=None):
     if user is None:
         user = getCurrentUser()
@@ -784,7 +827,16 @@ def _getVideoFormats(self, id=None):
             if vData['formatId']:
                 formatIds.add(vData['formatId'])
 
-        correctId = { '$or': [{'_id': _id} for _id in formatIds] }
+        correctId = [{'_id': _id} for _id in formatIds]
+        correctId = (
+            { 'type': 0xFFFF }  # should not match anything
+            if len(correctId) == 0 else
+
+            correctId[0]
+            if len(correctId) == 1 else
+
+            { '$or': correctId }
+        )
         query = { '$and': [query, correctId] }
 
     return list(videoModel.find(query))
@@ -959,19 +1011,10 @@ def createRoutes(file):
     @boundHandler(file)
     def getVideo(self, id, params):
         format = params.get('format')
+        sourceId, targetId, formatId = (
+                resolveFileId(self, id, formatName=format))
 
-        id = ObjectId(id)
-
-        formatId = None
-        if format:
-            formatId = _getVideoFormatByName(self, format)['_id']
-
-        sourceFile = getFile(self, id)
-
-        vData = getVideoData(
-            self, fileId=id, formatId=formatId, ensure=False)
-
-        if not vData:
+        if not targetId:
             msg = 'No source video found'
             if format:
                 msg = (
@@ -980,9 +1023,7 @@ def createRoutes(file):
 
             raise RestException(msg, 404)
 
-        targetFile = getFile(self, vData['fileId'])
-
-        return self.download(id=str(targetFile['_id']), params=dict(
+        return self.download(id=str(targetId), params=dict(
             item for item in params.items() if item[1] is not None
         ))
 
@@ -994,26 +1035,39 @@ def createRoutes(file):
                'Name of the format, or leave blank for the source video.',
                required=False)
         .errorResponse()
-        .errorResponse('Format not found.', 404)
+        .errorResponse(
+            'Source video has not been transcoded into Format.', 404)
         .errorResponse('Read access was denied on the file.', 403)
     )
     @access.cookie
     @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def fetchVideoData(self, id, params):
-        file = getFile(self, id)
-
         format = params.get('format')
-        formatId = None
-        if format:
-            formatId = _getVideoFormatByName(format)['_id']
+        sourceId, targetId, formatId = (
+                resolveFileId(self, id, formatName=format))
+        file = getFile(self, sourceId)
 
-        result = getVideoData(self, fileId=file['_id'], formatId=formatId)
+        result = getVideoData(self, fileId=sourceId, formatId=formatId)
+        if not result:
+            msg = 'No source video found'
+            if format:
+                msg = (
+                    "Source video has not been "
+                    "transcoded to format: '{}'".format(format))
+
+            raise RestException(msg, 404)
+
         result.pop('_id', None)
         result.pop('fileId', None)
         result.pop('sourceFileId', None)
         result.pop('formatId', None)
         result.pop('type', None)
+
+        if not formatId:
+            result['availableFormats'] = sorted([
+                form['name'] for form in _getVideoFormats(self, sourceId)])
+
         return result
 
 
@@ -1062,7 +1116,8 @@ def createRoutes(file):
         fileModel = self.model('file')
         videoModel = self.model('video', 'video')
 
-        id = ObjectId(id)
+        sourceId, targetId, formatId = (
+                resolveFileId(self, id, formatName=format))
 
         count = sum(x is not None for x in (percent, time, index))
 
@@ -1071,12 +1126,8 @@ def createRoutes(file):
                 'Must provide no more than one of either '
                 'percent, time, or index')
 
-        formatId = None
-        if format:
-            formatId = _getVideoFormatByName(self, format)['_id']
-
         vData = getVideoData(
-            self, fileId=id, formatId=formatId)
+            self, fileId=sourceId, formatId=formatId)
 
         if not vData:
             raise RestException('Video data not found', 404)
@@ -1149,7 +1200,7 @@ def createRoutes(file):
 
         query = {
             'type': VideoEnum.FRAME,
-            'sourceFileId': id,
+            'sourceFileId': sourceId,
             'formatId': formatId,
             'index': index
         }
@@ -1160,7 +1211,7 @@ def createRoutes(file):
                 item for item in params.items() if item[1] is not None
             ))
 
-        raise RestException('Frame not found.' + ' ' + str(query), 404)
+        raise RestException('Frame not found.', 404)
 
 
     @autoDescribeRoute(
@@ -1174,7 +1225,10 @@ def createRoutes(file):
     @access.public
     @boundHandler(file)
     def processVideo(self, id, params):
-        return analyzeVideo(self, id, params.get('force'))
+        sourceId, targetId, formatId = resolveFileId(self, id)
+        return analyzeVideo(
+            self, sourceId, formatId=formatId,
+            force=params.get('force', False))
 
 
     @autoDescribeRoute(
@@ -1186,8 +1240,10 @@ def createRoutes(file):
     @access.public
     @boundHandler(file)
     def deleteProcessedVideo(self, id, params):
-        cancelResponse = cancelVideoJobs(self, id)
-        removeResponse = removeVideoData(self, id)
+        sourceId, targetId, formatId = resolveFileId(self, id)
+
+        cancelResponse = cancelVideoJobs(self, sourceId, formatId=formatId)
+        removeResponse = removeVideoData(self, sourceId, formatId=formatId)
 
         cancelResponse.pop('message', None)
         removeResponse.pop('message', None)
@@ -1213,9 +1269,12 @@ def createRoutes(file):
     @access.public
     @boundHandler(file)
     def convertVideo(self, id, format, params):
-        formatId = _getVideoFormatByName(self, format)['_id']
+        sourceId, targetId, formatId = (
+                resolveFileId(self, id, formatName=format))
+
         return transcodeVideo(
-            self, id, formatId, force=params.get('force', False))
+            self, sourceId, formatId=formatId,
+            force=params.get('force', False))
 
 
     def wrap(fun):
