@@ -48,21 +48,29 @@ def validateSettings(doc):
     pass
 
 def _onFrames(event):
-    sourceFileId, numFrames, user, format = frameJobArgQueue.get()
+    sourceFileId, numFrames, user, formatId = frameJobArgQueue.get()
     videoUtilities['extractFrames'](
-        sourceFileId, numFrames, format=format, user=user)
+        sourceFileId, numFrames, formatId=formatId, user=user)
 
 def _onAnalyze(event):
-    sourceFileId, user, format = analyzeJobArgQueue.get()
+    sourceFileId, user, formatId = analyzeJobArgQueue.get()
     videoUtilities['analyzeVideo'](
-        sourceFileId, force=True, format=format, user=user)
+        sourceFileId, force=True, formatId=formatId, user=user)
 
 def _deleteVideoData(event):
     file = event.info
-    videodataModel = ModelImporter.model('videodata', 'video')
-    vData = videodataModel.findOne({ 'fileId': file['_id'] })
-    if vData:
-        videodataModel.remove(vData)
+    videoModel = ModelImporter.model('video', 'video')
+
+    # TODO(opadron): remove all video entries with fileId == file['_id']
+    #                    - EXCEPT for those with sourceFileId == file['_id']
+    #
+    # TODO(opadron): for all video entries with sourceFileId == file['_id']:
+    #                    - delete the file identified by "fileId"
+    #                    - the above step should trigger this handler
+    #                      recursively.
+    # vData = videoModel.findOne({ 'fileId': file['_id'] })
+    # if vData:
+    #     videodataModel.remove(vData)
 
 def _postUpload(event):
     """
@@ -70,99 +78,76 @@ def _postUpload(event):
     plugin's processing jobs, they are handled here.
     """
     reference = event.info.get('reference', '')
-    if not reference.startswith('videoPlugin'):
+    if not reference.startswith('videoPlugin:'):
         return
 
-    if reference.startswith('videoPlugin:analysis:'):
-        fileModel = ModelImporter.model('file')
-        videodataModel = ModelImporter.model('videodata', 'video')
-        tokens = reference.split(':')[2:]
+    payload = {}
+    try:
+        payload = json.loads(reference[12:])
+    except:
+        pass
 
-        sourceFileId = None
-        format = None
-        if len(tokens) == 1:
-            sourceFileId = tokens[0]
-        else:
-            sourceFileId, format = tokens[:2]
+    uploadedFile = event.info['file']
+    referencedFileId = ObjectId(payload['fileId'])
+    formatId = ObjectId(payload['formatId']) if payload['formatId'] else None
+    user = event.info['currentUser']
 
+    fileModel = ModelImporter.model('file')
+    videoModel = ModelImporter.model('video', 'video')
+
+    # Detach the uploaded file from the staging item and
+    # reattach it to the referenced file.
+    uploadedFile.update({
+        'itemId': None,
+        'attachedToId': referencedFileId,
+        'attachedToType': 'file',
+    })
+
+    uploadedFile = fileModel.save(uploadedFile)
+
+    if payload['dataType'] == 'analysis':
         vData = videoUtilities['getVideoData'](
-                id=sourceFileId,
-                level=AccessType.WRITE,
-                format=format,
-                user=event.info['currentUser'])
+                fileId=referencedFileId,
+                formatId=formatId,
+                user=user,
+                ensure=True)
 
         with fileModel.open(event.info['file']) as f:
-            vData['metadata'] = json.load(f)
+            data = json.load(f)
+            vData.update(data)
 
-        videodataModel.save(vData)
+        vData = videoModel.save(vData)
 
-        numFrames = int(
-            vData
-                .get('metadata', {})
-                .get('video', {})
-                .get('frameCount', 0))
-
+        numFrames = int(vData.get('videoFrameCount', 0))
         if numFrames:
             frameJobArgQueue.put(
-                (sourceFileId, numFrames, event.info['currentUser'], format))
-            events.daemon.trigger('frameExtract', 'video', format)
+                (referencedFileId, numFrames, user, formatId))
+            events.daemon.trigger('frameExtract', 'video', formatId)
 
-    elif reference.startswith('videoPlugin:frame:'):
-        fileModel = ModelImporter.model('file')
-        videodataModel = ModelImporter.model('videodata', 'video')
-        videoframeModel = ModelImporter.model('videoframe', 'video')
-        tokens = reference.split(':')[2:]
+    elif payload['dataType'] == 'frame':
+        frameIndex = payload['index']
 
-        sourceFileId = None
-        format = None
-        frameIndex = None
+        vData = videoModel.createVideoFrame(
+            fileId=uploadedFile['_id'],
+            sourceFileId=referencedFileId,
+            formatId=formatId,
+            index=frameIndex,
+            save=True)
 
-        if len(tokens) == 2:
-            sourceFileId, frameIndex = tokens
-        else:
-            format, sourceFileId, frameIndex = tokens[:3]
-
-        frameIndex = int(frameIndex)
-
-        if format is None:
-            videoframeModel.createVideoframe(
-                fileId=sourceFileId, index=frameIndex,
-                itemId=event.info['file']['itemId'], save=True)
-        else:
-            videoframeModel.createVideoframe(
-                sourceFileId=sourceFileId, index=frameIndex, formatName=format,
-                itemId=event.info['file']['itemId'], save=True)
-
-    elif reference.startswith('videoPlugin:transcoding:'):
-        videodataModel = ModelImporter.model('videodata', 'video')
-        videojobModel = ModelImporter.model('videojob', 'video')
-        sourceFileId, format = reference.split(':')[2:]
-
+    elif payload['dataType'] == 'transcoding':
         vData = videoUtilities['getVideoData'](
-                id=sourceFileId,
-                level=AccessType.WRITE,
-                format=format,
-                user=event.info['currentUser'])
+                fileId=referencedFileId,
+                formatId=formatId,
+                user=event.info['currentUser'],
+                ensure=True)
 
-        vJob = videojobModel.findOne({
-            'type': 'transcoding',
-            'sourceFileId': ObjectId(sourceFileId),
-            'formatName': format })
+        update = { 'fileId': uploadedFile['_id'] }
+        vData.update(update)
 
-        vJob = videojobModel.load(
-                vJob['_id'],
-                level=AccessType.WRITE,
-                user=event.info['currentUser'])
-
-        vJob['fileId'] = event.info['file']['_id']
-        videojobModel.save(vJob)
-
-        vData['fileId'] = event.info['file']['_id']
-        videodataModel.save(vData)
+        videoModel.save(vData)
 
         analyzeJobArgQueue.put(
-            (sourceFileId, event.info['currentUser'], format))
-
+            (referencedFileId, event.info['currentUser'], formatId))
         events.daemon.trigger('videoAnalyze', 'video', None)
 
 
@@ -316,7 +301,23 @@ def itemValidate(self, doc):
         doc['lowerName'] = doc['name'].lower()
         return doc
 
-    return self._originalValidate(self, doc)
+    return self._originalValidate(doc)
+
+
+def createUpload(self, *args, **kwargs):
+    reference = kwargs.get('reference')
+
+    customPayload = None
+    if reference and reference.startswith('override:'):
+        try:
+            customPayload = json.loads(reference[9:])
+        except:
+            pass
+
+    if customPayload:
+        kwargs.update(customPayload)
+
+    return self._originalCreateUpload(*args, **kwargs)
 
 
 # Configuration and load
@@ -328,7 +329,9 @@ def itemValidate(self, doc):
 )
 def load(info):
     global videoUtilities
-    from .rest import addFileRoutes
+    from .rest import addFileRoutes, Video
+
+    info['apiRoot'].video = Video()
 
     routeTable = addFileRoutes(info['apiRoot'].file)
     videoUtilities = routeTable['utilities']
@@ -351,6 +354,13 @@ def load(info):
     )
 
     Item.createHiddenItem = createHiddenItem
+
+    from girder.models.upload import Upload
+    (
+        Upload._originalCreateUpload, Upload.createUpload
+    ) = (
+        Upload.createUpload         , createUpload
+    )
 
     events.bind('data.process', 'video', _postUpload)
     events.bind('model.file.remove', 'video', _deleteVideoData)

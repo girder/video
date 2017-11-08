@@ -20,7 +20,7 @@ FFPROBE = 'ffprobe'
 def convert(x, type=int, **kwds):
     try:
         return type(x)
-    except ValueError:
+    except (ValueError, TypeError):
         return kwds.get('alt', x)
 
 
@@ -110,73 +110,82 @@ def analyze_main(args):
             break
 
     assert(v_stream)
+    has_audio = bool(a_stream)
+    a_stream = a_stream or {}
 
-    frame_rate = v_stream['avg_frame_rate']
+    audioChannelCount = convert(a_stream.get('channels'   ), int  , alt=None)
+    audioBitRate      = convert(a_stream.get('bit_rate'   ), float, alt=None)
+    audioSampleRate   = convert(a_stream.get('sample_rate'), float, alt=None)
 
-    if '/' in frame_rate:
-        a, b = tuple(float(x) for x in frame_rate.split('/', maxsplit=1))
-        frame_rate = a/b
+    audioChannelLayout = a_stream.get('channel_layout')
+    audioSampleFormat  = a_stream.get('sample_fmt'    )
+
+    videoWidth      = convert(v_stream.get('width'    ), int  , alt=None)
+    videoHeight     = convert(v_stream.get('height'   ), int  , alt=None)
+    videoFrameCount = convert(v_stream.get('nb_frames'), int  , alt=None)
+    videoBitRate    = convert(v_stream.get('bit_rate' ), float, alt=None)
+
+    duration = convert(v_stream.get('duration'), float, alt=None)
+
+    videoFrameRate = v_stream['avg_frame_rate']
+
+    if '/' in videoFrameRate:
+        a, b = tuple(float(x) for x in videoFrameRate.split('/', maxsplit=1))
+        videoFrameRate = a/b
     else:
-        frame_rate = convert(frame_rate, float, alt=None)
+        videoFrameRate = convert(videoFrameRate, float, alt=None)
 
-
-    metadata = {
-        'audio': {} if not a_stream else {
-            'bitRate': convert(a_stream['bit_rate'], int, alt=None),
-            'sampleRate': convert(a_stream['sample_rate'], int, alt=None),
-            'sampleFormat': a_stream['sample_fmt'],
-            'numChannels': convert(a_stream['channels'], int, alt=None),
-            'channelLayout': a_stream['channel_layout'],
-        },
-
-        'video': {
-            'width': convert(v_stream['width'], int, alt=None),
-            'height': convert(v_stream['height'], int, alt=None),
-            'frameRate': frame_rate,
-            'bitRate': convert(v_stream['bit_rate'], int, alt=None),
-            'frameCount': convert(v_stream['nb_frames'], int, alt=None),
-        },
-
-        'duration': convert(v_stream['duration'], float, alt=None),
-    }
-
-    if metadata['audio'] and metadata['audio']['bitRate'] is None:
+    if has_audio and audioBitRate is None:
         cmd = [
             FFPROBE, '-v', 'error', '-i', input_file, '-select_streams',
             'a:0', '-show_entries', 'stream=bit_rate', '-of',
             'default=nokey=1:noprint_wrappers=1']
 
-        metadata['audio']['bitRate'] = convert(
-            subprocess.check_output(cmd, universal_newlines=True).strip(), int)
+        audioBitRate = subprocess.check_output(cmd, universal_newlines=True)
+        audioBitRate = convert(audioBitRate.strip(), float, alt=None)
 
-    if metadata['video']['bitRate'] is None:
+    if videoBitRate is None:
         cmd = [
             FFPROBE, '-v', 'error', '-i', input_file, '-select_streams',
             'v:0', '-show_entries', 'stream=bit_rate', '-of',
             'default=nokey=1:noprint_wrappers=1']
 
-        metadata['video']['bitRate'] = convert(
-            subprocess.check_output(cmd, universal_newlines=True).strip(), int)
+        videoBitRate = subprocess.check_output(cmd, universal_newlines=True)
+        videoBitRate = convert(videoBitRate.strip(), float, alt=None)
 
-    if metadata['video']['frameCount'] is None:
+    if videoFrameCount is None:
         cmd = [
             FFPROBE, '-v', 'error', '-i', input_file, '-count_frames',
             '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames',
             '-of', 'default=nokey=1:noprint_wrappers=1']
 
-        metadata['video']['frameCount'] = convert(
-            subprocess.check_output(cmd, universal_newlines=True).strip(), int)
+        videoFrameCount = subprocess.check_output(cmd, universal_newlines=True)
+        videoFrameCount = convert(videoFrameCount.strip(), int, alt=None)
 
-    if metadata['duration'] is None:
+    if duration is None:
         cmd = [
             FFPROBE, '-v', 'error', '-i', input_file, '-show_entries',
             'format=duration', '-of', 'default=nokey=1:noprint_wrappers=1']
 
-        metadata['duration'] = convert(
-            subprocess.check_output(cmd, universal_newlines=True).strip(), float)
+        duration = subprocess.check_output(cmd, universal_newlines=True)
+        duration = convert(duration.strip(), float, alt=None)
+
+    result = {
+        'audioBitRate'      : audioBitRate,
+        'audioChannelCount' : audioChannelCount,
+        'audioChannelLayout': audioChannelLayout,
+        'audioSampleFormat' : audioSampleFormat,
+        'audioSampleRate'   : audioSampleRate,
+        'duration'          : duration,
+        'videoBitRate'      : videoBitRate,
+        'videoFrameCount'   : videoFrameCount,
+        'videoFrameRate'    : videoFrameRate,
+        'videoHeight'       : videoHeight,
+        'videoWidth'        : videoWidth
+    }
 
     with open(os.path.join(GIRDER_WORKER_DIR, 'meta.json'), 'w') as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(result, f, indent=2)
 
 
 def extract_main(args):

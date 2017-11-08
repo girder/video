@@ -17,7 +17,7 @@
 #  limitations under the License.
 ##############################################################################
 
-from .video import addFileRoutes
+from .video import addFileRoutes, Video
 
 
-__all__ = ('addFileRoutes',)
+__all__ = ('addFileRoutes', 'Video')

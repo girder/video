@@ -17,6 +17,7 @@
 #  limitations under the License.
 ##############################################################################
 
+import json
 import os.path
 
 from functools import wraps
@@ -28,14 +29,881 @@ from bson.objectid import ObjectId
 from girder import logger
 from girder.api import access
 from girder.api.describe import autoDescribeRoute, Description
-from girder.api.rest import filtermodel, RestException, \
+from girder.api.rest import filtermodel, RestException, Resource, \
                             boundHandler, getCurrentUser
 
 from girder.constants import AccessType, TokenScope
 from girder.plugins.worker import utils as workerUtils
 from girder.models.model_base import ValidationException
 
-from ..constants import JobStatus
+from ..constants import JobStatus, VideoEnum, VideoEnum
+
+
+### BEGIN HELPER FUNCTIONS     TODO - Refactor
+def getFile(self, id, user=None, level=None):
+    if user is None:
+        user = getCurrentUser()
+
+    if level is None:
+        level = AccessType.READ
+
+    result = self.model('file').load(id, user=user, level=level)
+    return result
+
+
+def getVideoData(
+        self, fileId=None, formatId=None,
+        user=None, ensure=False):
+    videoModel = self.model('video', 'video')
+
+    if user is None:
+        user = getCurrentUser()
+
+    data = None
+    if formatId is None:
+        data = videoModel.findOne({
+            'type': VideoEnum.FILE,
+            'fileId': fileId,
+            'sourceFileId': fileId
+        })
+
+        if not data and ensure:
+            data = videoModel.createVideoFile(fileId=fileId)
+    else:
+        data = videoModel.findOne({
+            'type': VideoEnum.FILE,
+            'sourceFileId': fileId,
+            'formatId': formatId
+        })
+
+        if not data and ensure:
+            data = videoModel.createVideoFile(
+                sourceFileId=fileId,
+                formatId=formatId)
+
+    return data
+
+
+def cancelVideoJobs(
+        self, id, formatId=None, user=None, mask=None, cascade=True):
+    videoModel = self.model('video', 'video')
+    jobModel = self.model('job', 'jobs')
+
+    _id = ObjectId(id)
+
+    if not user:
+        user = getCurrentUser()
+
+    if mask is None:
+        mask = (VideoEnum.ANALYSIS |
+                VideoEnum.TRANSCODING |
+                VideoEnum.FRAME_EXTRACTION)
+
+    isJob = { 'type': VideoEnum.JOB }
+
+    isCorrectJobType = [
+        { 'jobType': jobType }
+        for jobType in (
+            VideoEnum.ANALYSIS,
+            VideoEnum.TRANSCODING,
+            VideoEnum.FRAME_EXTRACTION)
+        if jobType & mask
+    ]
+
+    isCorrectJobType = (
+        { 'type': 0xFFFF }  # should not match anything
+        if len(isCorrectJobType) == 0 else
+
+        isCorrectJobType[0]
+        if len(isCorrectJobType) == 1 else
+
+        { '$or': isCorrectJobType }
+    )
+
+    derivedFromSource = { 'sourceFileId': _id }
+    matchesSource = { 'fileId': _id }
+    notMatchesSource = { 'fileId': { '$ne' : _id } }
+
+    isCorrectId = (
+        { '$and' : [derivedFromSource, notMatchesSource] }
+        if formatId else
+
+        derivedFromSource
+        if cascade else
+
+        matchesSource
+    )
+
+    query = [isJob, isCorrectJobType, isCorrectId]
+    if not cascade:
+        query.append({ 'formatId': formatId })
+
+    canceledJobs = set()
+
+    for vJob in videoModel.find({ '$and': query }):
+        job = jobModel.load(
+            vJob['jobId'], level=AccessType.WRITE, user=user)
+
+        try:
+            jobModel.cancelJob(job)
+            canceledJobs.add(str(job['_id']))
+        except ValidationException:
+            pass
+
+        videoModel.remove(vJob)
+
+    return {
+        'message': 'Video processing jobs canceled.',
+        'fileId': id,
+        'canceledJobs': list(canceledJobs)
+    }
+
+
+def removeVideoData(
+        self, id, formatId=None, user=None, mask=None, cascade=True):
+    fileModel = self.model('file')
+    videoModel = self.model('video', 'video')
+
+    _id = ObjectId(id)
+
+    if not user:
+        user = getCurrentUser()
+
+    if mask is None:
+        mask = (VideoEnum.FILE | VideoEnum.FRAME)
+
+    isCorrectType = [
+        { 'type': type }
+        for type in (VideoEnum.FILE, VideoEnum.FRAME)
+        if type & mask
+    ]
+
+    isCorrectType = (
+        { 'type': 0xFFFF }  # should not match anything
+        if len(isCorrectType) == 0 else
+
+        isCorrectType[0]
+        if len(isCorrectType) == 1 else
+
+        { '$or': isCorrectType }
+    )
+
+    derivedFromSource = { 'sourceFileId': _id }
+    matchesSource = { 'fileId': _id }
+    notMatchesSource = { 'fileId': { '$ne' : _id } }
+
+    isCorrectId = (
+        { '$and' : [derivedFromSource, notMatchesSource] }
+        if formatId else
+
+        derivedFromSource
+        if cascade else
+
+        matchesSource
+    )
+
+    query = [isCorrectType, isCorrectId]
+    if not cascade:
+        query.append({ 'formatId': formatId })
+
+    deletedFiles = set()
+
+    for vData in videoModel.find({ '$and': query }):
+        file = fileModel.load(
+            vData['fileId'], level=AccessType.WRITE, user=user)
+
+        videoModel.remove(vData)
+
+        try:
+            fileModel.remove(file)
+            deletedFiles.add(str(file['_id']))
+        except ValidationException:
+            pass
+
+    return {
+        'message': 'Processed video data deleted.',
+        'fileId': id,
+        'deletedFiles': list(deletedFiles)
+    }
+
+
+def analyzeVideo(self, fileId, force=False, formatId=None, user=None):
+    userToken = None
+
+    if user is None:
+        user, userToken = getCurrentUser(True)
+
+    itemModel = self.model('item')
+    tokenModel = self.model('token')
+    jobModel = self.model('job', 'jobs')
+    videoModel = self.model('video', 'video')
+
+    file = getFile(self, fileId, user=user)
+
+    vData = getVideoData(
+        self, fileId=fileId, formatId=formatId, user=user, ensure=True)
+
+    vJob = videoModel.findOne({
+        'type': VideoEnum.JOB,
+        'jobType': VideoEnum.ANALYSIS,
+        'fileId': vData['fileId'],
+        'sourceFileId': vData['sourceFileId']
+    })
+
+    jobId = (vJob or {}).get('jobId')
+
+    itemAlreadyProcessed = False
+    job = None
+    if jobId is not None:
+        job = jobModel.load(jobId, level=AccessType.READ, user=user)
+
+    if not force:
+        if job is not None:
+            status = job['status']
+            if status not in (
+                    None, JobStatus.ERROR, JobStatus.CANCELED):
+                itemAlreadyProcessed = True
+
+        if itemAlreadyProcessed:
+            result = {
+                'video': {
+                    'jobCreated': False,
+                    'message': 'Processing job already created.'
+                }
+            }
+
+            result.update(job)
+            return result
+
+    # if we are *re*running a processing job (force=True), remove all data
+    # for this video that were created by the last processing jobs
+    if force:
+        cancelVideoJobs(
+            self, fileId, formatId=formatId, user=user,
+            mask=VideoEnum.ANALYSIS, cascade=False)
+
+    # begin construction of the actual job
+    if not userToken:
+        userToken = tokenModel.createToken(
+            user, days=1, scope=TokenScope.USER_AUTH)
+
+    stash = itemModel.createHiddenItem(user)
+    stash = itemModel.load(stash['_id'], level=AccessType.WRITE, user=user)
+    targetFile = getFile(self, vData['fileId'], user=user)
+
+    jobTitle = '[video] Analysis'
+    job = jobModel.createJob(
+        title=jobTitle,
+        type='video',
+        user=user,
+        handler='worker_handler'
+    )
+    jobToken = jobModel.createJobToken(job)
+
+    job['kwargs'] = job.get('kwargs', {})
+    job['kwargs']['task'] = {
+        'mode': 'docker',
+
+        # TODO(opadron): replace this once we have a maintained
+        #                image on dockerhub
+        'docker_image': 'ffmpeg_local',
+        'pull_image': False,
+        'container_args': ['analyze'],
+        'inputs': [
+            {
+                'id': 'input',
+                'type': 'string',
+                'format': 'text',
+                'target': 'filepath'
+            }
+        ],
+        'outputs': [
+            {
+                'id': 'meta',
+                'type:': 'string',
+                'format': 'text',
+                'target': 'filepath',
+                'path': '/mnt/girder_worker/data/meta.json'
+            },
+        ]
+    }
+
+    _, itemExt = os.path.splitext(targetFile['name'])
+
+    job['kwargs']['inputs'] = {
+        'input': workerUtils.girderInputSpec(
+            targetFile,
+            resourceType='file',
+            token=userToken,
+            name='input' + itemExt,
+            dataType='string',
+            dataFormat='text'
+        )
+    }
+
+
+    job['kwargs']['outputs'] = {
+        'meta': workerUtils.girderOutputSpec(
+            stash,
+            parentType='item',
+            token=userToken,
+            name='meta.json',
+            dataType='string',
+            dataFormat='text',
+            reference=':'.join(('override', json.dumps(dict(
+                attachParent=True,
+                # assetstore=None, TODO(opadron)
+                reference=':'.join(('videoPlugin', json.dumps(dict(
+                    fileId=str(fileId),
+                    formatId=str(formatId) if formatId else None,
+                    dataType='analysis',
+                ))))
+            ))))
+        )
+    }
+
+    job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
+        job=job,
+        token=jobToken,
+        logPrint=True)
+
+    job = jobModel.save(job)
+    jobModel.scheduleJob(job)
+
+    videoModel.createVideoJob(
+        fileId=vData['fileId'],
+        sourceFileId=vData['sourceFileId'],
+        formatId=formatId,
+        jobType=VideoEnum.ANALYSIS,
+        jobId=job['_id'],
+        save=True)
+
+    result = {
+        'video': {
+            'jobCreated': True,
+            'message': 'Processing job created.'
+        }
+    }
+
+    result.update(job)
+    return result
+
+
+def transcodeVideo(self, fileId, formatId, force=False, user=None):
+    userToken = None
+
+    if user is None:
+        user, userToken = getCurrentUser(True)
+
+    itemModel = self.model('item')
+    tokenModel = self.model('token')
+    jobModel = self.model('job', 'jobs')
+    videoModel = self.model('video', 'video')
+
+    file = getFile(self, fileId)
+    originalFileName, _ = os.path.splitext(file['name'])
+
+    formatName = None
+    if formatId:
+        format = videoModel.findOne({
+            'type': VideoEnum.FORMAT,
+            '_id': ObjectId(formatId)
+        })
+
+        formatName = format['name']
+        formatId = format['_id']
+
+    fData = videoModel.findOne({
+        'type': VideoEnum.FORMAT,
+        '_id': formatId
+    })
+
+    videoCodec = fData.get('videoCodec')
+    audioCodec = fData.get('audioCodec')
+
+    width = fData.get('videoWidth')
+    height = fData.get('videoHeight')
+
+    dimensions = None
+    if width and height:
+        dimensions = '%dx%d' % (width, height)
+
+    audioSampleRate = fData.get('audioSampleRate')
+    audioBitRate = fData.get('audioBitRate')
+    videoBitRate = fData.get('videoBitRate')
+
+    vData = getVideoData(
+        self, fileId=fileId, formatId=formatId, user=user, ensure=True)
+
+    vJob = videoModel.findOne({
+        'type': VideoEnum.JOB,
+        'jobType': VideoEnum.TRANSCODING,
+        'sourceFileId': vData['sourceFileId'],
+        'formatId': formatId
+    })
+
+    jobId = (vJob or {}).get('jobId')
+
+    itemAlreadyProcessed = False
+    job = None
+    if jobId is not None:
+        job = jobModel.load(jobId, level=AccessType.READ, user=user)
+
+    if not force:
+        if job is not None:
+            status = job['status']
+            if status not in (
+                    None, JobStatus.ERROR, JobStatus.CANCELED):
+                itemAlreadyProcessed = True
+
+        if itemAlreadyProcessed:
+            result = {
+                'video': {
+                    'jobCreated': False,
+                    'message': 'Processing job already created.'
+                }
+            }
+
+            result.update(job)
+            return result
+
+    # if we are *re*running a processing job (force=True), remove all data
+    # for this video that were created by the last processing jobs
+    if force:
+        cancelVideoJobs(self, fileId, formatId=formatId, user=user,
+            mask=VideoEnum.TRANSCODING | VideoEnum.FRAME_EXTRACTION,
+            cascade=False)
+
+        removeVideoData(self, fileId, formatId=formatId, user=user,
+            mask=VideoEnum.FILE, cascade=False)
+
+    # begin construction of the actual job
+    if not userToken:
+        userToken = tokenModel.createToken(
+            user, days=1, scope=TokenScope.USER_AUTH)
+
+    stash = itemModel.createHiddenItem(user)
+    stash = itemModel.load(stash['_id'], level=AccessType.WRITE, user=user)
+
+    jobTitle = '[video] Transcoding'
+    job = jobModel.createJob(
+        title=jobTitle,
+        type='video',
+        user=user,
+        handler='worker_handler'
+    )
+    jobToken = jobModel.createJobToken(job)
+
+    container_args = ['transcode']
+
+    for code, val in (('VCODEC', videoCodec),
+                      ('ACODEC', audioCodec),
+                      ('DIMENSIONS', dimensions),
+                      ('ASRATE', audioSampleRate),
+                      ('ABRATE', audioBitRate),
+                      ('VBRATE', videoBitRate)):
+        if val:
+            container_args.extend([code, val])
+
+    # TODO(opadron): add more options
+    fileExtension = None
+    if videoCodec == 'VP9':
+        fileExtension = 'webm'
+    else:
+        fileExtension = 'webm'
+
+    job['kwargs'] = job.get('kwargs', {})
+    job['kwargs']['task'] = {
+        'mode': 'docker',
+
+        # TODO(opadron): replace this once we have a maintained
+        #                image on dockerhub
+        'docker_image': 'ffmpeg_local',
+        'pull_image': False,
+        'container_args': container_args + [fileExtension],
+        'inputs': [
+            {
+                'id': 'input',
+                'type': 'string',
+                'format': 'text',
+                'target': 'filepath'
+            }
+        ],
+        'outputs': [
+            {
+                'id': 'output',
+                'type:': 'string',
+                'format': 'text',
+                'target': 'filepath',
+                'path': '/mnt/girder_worker/data/output.%s' % fileExtension
+            },
+        ]
+    }
+
+    _, itemExt = os.path.splitext(file['name'])
+
+    job['kwargs']['inputs'] = {
+        'input': workerUtils.girderInputSpec(
+            file,
+            resourceType='file',
+            token=userToken,
+            name='input' + itemExt,
+            dataType='string',
+            dataFormat='text'
+        )
+    }
+
+    job['kwargs']['outputs'] = {
+        'output': workerUtils.girderOutputSpec(
+            stash,
+            parentType='item',
+            token=userToken,
+            name='%s_%s.%s' % (originalFileName, formatName, fileExtension),
+            dataType='string',
+            dataFormat='text',
+            reference=':'.join(('override', json.dumps(dict(
+                attachParent=True,
+                # assetstore=None, TODO(opadron)
+                reference=':'.join(('videoPlugin', json.dumps(dict(
+                    fileId=str(fileId),
+                    formatId=str(formatId) if formatId else None,
+                    dataType='transcoding'
+                ))))
+            ))))
+        )
+    }
+
+    job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
+        job=job,
+        token=jobToken,
+        logPrint=True)
+
+    job = jobModel.save(job)
+    jobModel.scheduleJob(job)
+
+    videoModel.createVideoJob(
+        fileId=fileId,
+        sourceFileId=fileId,
+        formatId=formatId,
+        jobType=VideoEnum.TRANSCODING,
+        jobId=job['_id'],
+        save=True)
+
+    videoModel.save(vData)
+
+    result = {
+        'video': {
+            'jobCreated': True,
+            'message': 'Processing job created.'
+        }
+    }
+
+    result.update(job)
+    return result
+
+
+def extractFrames(
+        self, fileId, numFrames, formatId=None, user=None, force=False):
+    userToken = None
+
+    if user is None:
+        user, userToken = getCurrentUser(True)
+
+    itemModel = self.model('item')
+    tokenModel = self.model('token')
+    jobModel = self.model('job', 'jobs')
+    videoModel = self.model('video', 'video')
+
+    file = getFile(self, fileId, user=user)
+    vData = getVideoData(
+        self, fileId=fileId, formatId=formatId, user=user)
+
+    inputFile = file
+    if formatId:
+        inputFile = getFile(self, vData['fileId'], user=user)
+
+    vJob = videoModel.findOne({
+        'type': VideoEnum.JOB,
+        'jobType': VideoEnum.FRAME_EXTRACTION,
+        'sourceFileId': vData['sourceFileId'],
+        'formatId': formatId
+    })
+
+    jobId = (vJob or {}).get('jobId')
+
+    itemAlreadyProcessed = False
+    job = None
+    if jobId is not None:
+        job = jobModel.load(jobId, level=AccessType.READ, user=user)
+
+    if not force:
+        if job is not None:
+            status = job['status']
+            if status not in (
+                    None, JobStatus.ERROR, JobStatus.CANCELED):
+                itemAlreadyProcessed = True
+
+        if itemAlreadyProcessed:
+            result = {
+                'video': {
+                    'jobCreated': False,
+                    'message': 'Processing job already created.'
+                }
+            }
+
+            result.update(job)
+            return result
+
+    # if we are *re*running a processing job (force=True), remove all data
+    # for this video that were created by the last processing jobs
+    if force:
+        cancelVideoJobs(self, fileId, formatId=formatId, user=user,
+            mask=VideoEnum.FRAME_EXTRACTION, cascade=False)
+
+        removeVideoData(self, fileId, formatId=formatId, user=user,
+            mask=VideoEnum.FRAME, cascade=False)
+
+    if not userToken:
+        userToken = tokenModel.createToken(
+            user, days=1, scope=TokenScope.USER_AUTH)
+
+    stash = itemModel.createHiddenItem(user)
+    stash = itemModel.load(stash['_id'], level=AccessType.WRITE, user=user)
+
+    jobTitle = '[video] Frame Extraction'
+    job = jobModel.createJob(
+        title=jobTitle,
+        type='video',
+        user=user,
+        handler='worker_handler'
+    )
+    jobToken = jobModel.createJobToken(job)
+
+    job['kwargs'] = job.get('kwargs', {})
+    job['kwargs']['task'] = {
+        'mode': 'docker',
+
+        # TODO(opadron): replace this once we have a maintained
+        #                image on dockerhub
+        'docker_image': 'ffmpeg_local',
+        'pull_image': False,
+        'container_args': ['extract', str(numFrames)],
+        'inputs': [
+            {
+                'id': 'input',
+                'type': 'string',
+                'format': 'text',
+                'target': 'filepath'
+            }
+        ],
+        'outputs': [
+            {
+                'id': 'frame%d' % index,
+                'type:': 'string',
+                'format': 'text',
+                'target': 'filepath',
+                'path': '/mnt/girder_worker/data/%d.png' % (index + 1)
+            }
+            for index in range(numFrames)
+        ]
+    }
+
+    _, itemExt = os.path.splitext(inputFile['name'])
+
+    job['kwargs']['inputs'] = {
+        'input': workerUtils.girderInputSpec(
+            inputFile,
+            resourceType='file',
+            token=userToken,
+            name='input' + itemExt,
+            dataType='string',
+            dataFormat='text'
+        )
+    }
+
+    job['kwargs']['outputs'] = dict(
+        (
+            'frame%d' % index,
+            workerUtils.girderOutputSpec(
+                stash,
+                parentType='item',
+                token=userToken,
+                name='%d.png' % index,
+                dataType='string',
+                dataFormat='text',
+                reference=':'.join(('override', json.dumps(dict(
+                    attachParent=True,
+                    # assetstore=None, TODO(opadron)
+                    reference=':'.join(('videoPlugin', json.dumps(dict(
+                        fileId=str(fileId),
+                        formatId=str(formatId) if formatId else None,
+                        dataType='frame',
+                        index=index
+                    ))))
+                ))))
+            )
+        )
+        for index in range(numFrames)
+    )
+
+    job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
+        job=job,
+        token=jobToken,
+        logPrint=True)
+
+    job = jobModel.save(job)
+    jobModel.scheduleJob(job)
+
+    videoModel.createVideoJob(
+        fileId=inputFile['_id'],
+        sourceFileId=fileId,
+        formatId=formatId,
+        jobType=VideoEnum.FRAME_EXTRACTION,
+        jobId=job['_id'],
+        save=True)
+
+    result = {
+        'video': {
+            'jobCreated': True,
+            'message': 'Frame extraction job created.'
+        }
+    }
+
+    result.update(job)
+    return result
+
+def _getVideoFormats(self, id=None):
+    videoModel = self.model('video', 'video')
+
+    query = { 'type': VideoEnum.FORMAT }
+
+    if id:
+        formatIds = set()
+        for vData in videoModel.find({'sourceFileId': id,
+                                      'type': VideoEnum.FILE}):
+            if vData['formatId']:
+                formatIds.add(vData['formatId'])
+
+        correctId = { '$or': [{'_id': _id} for _id in formatIds] }
+        query = { '$and': [query, correctId] }
+
+    return list(videoModel.find(query))
+
+def _getVideoFormatByName(self, name, id=None):
+    videoModel = self.model('video', 'video')
+
+    format = videoModel.findOne({
+        'type': VideoEnum.FORMAT,
+        'name': name
+    })
+
+    result = None
+
+    if id:
+        query = {
+            'sourceFileId': id,
+            'type': VideoEnum.FILE,
+            'formatId': format['_id']
+        }
+
+        if videoModel.findOne(query):
+            result = format
+    else:
+        result = format
+
+    if result:
+        return result
+
+    raise RestException('No such video format', 404)
+### END HELPER FUNCTIONS     TODO - Refactor
+
+
+class Video(Resource):
+    """Video API route class."""
+
+    def __init__(self):
+        super(Video, self).__init__()
+        self.resourceName = 'video'
+        self.route('GET', ('format',), self.getFormats)
+        self.route('GET', ('format', ':name'), self.getFormatByName)
+        self.route('POST', ('format',), self.createFormat)
+        self.route('DELETE', ('format', ':name'), self.deleteFormatByName)
+
+    @autoDescribeRoute(
+        Description('Return a list of defined video formats.'))
+    @access.public
+    def getFormats(self, params):
+        return _getVideoFormats(self)
+
+    @autoDescribeRoute(
+        Description('Look up a defined video format by name.')
+        .param('name', 'Name of the defined video fromat', paramType='path',
+               required=True)
+        .errorResponse()
+        .errorResponse('No such video format.', 404)
+    )
+    @access.public(scope=TokenScope.DATA_READ)
+    def getFormatByName(self, name, params):
+        return _getVideoFormatByName(self, name)
+
+    @autoDescribeRoute(
+        Description('Create a new video format.')
+        .param('name', 'Name of the new format.', required=True)
+        .param('dimensions', 'Dimensions of the video.', required=False)
+        .param('videoCodec', 'Video codec for the video.',
+            required=False, enum=['VP9'], default='VP9')
+        .param('audioCodec', 'Audio codec for the video.',
+            required=False, enum=['OPUS'], default='OPUS')
+        .param(
+            'audioSampleRate',
+            'Sampling rate for the video audio.',
+            required=False)
+        .param('audioBitRate', 'Bit rate for the video audio.', required=False)
+        .param('videoBitRate', 'Bit rate for the video.', required=False)
+        .errorResponse()
+        .errorResponse('Format with the given name already exists.', 400)
+        .errorResponse('Admin access denied.', 403)
+    )
+    @access.admin
+    def createFormat(self, params):
+        videoModel = self.model('video', 'video')
+        name = params.pop('name', None)
+
+        if videoModel.findOne({ 'type': VideoEnum.FORMAT, 'name': name }):
+            raise RestException(
+                'Format with the given name already exists.', 400)
+
+        params.pop('save', None)
+        dims = params.pop('dimensions', None)
+        if dims:
+            w, h = tuple(int(x) for x in dims.split('x'))
+            params.update({ 'videoHeight': h, 'videoWidth': w })
+
+        return videoModel.createVideoFormat(
+            name=name, save=True, **params)
+
+    @autoDescribeRoute(
+        Description('Delete a video format.')
+        .param('name', 'Name of the format.', paramType='path', required=True)
+        .errorResponse()
+        .errorResponse('Format with the given name does not exist.', 404)
+        .errorResponse('Admin access denied.', 403)
+    )
+    @access.admin
+    def deleteFormatByName(self, name, params):
+        videoModel = self.model('video', 'video')
+
+        vData = videoModel.findOne({
+            'type': VideoEnum.FORMAT, 'name': name })
+
+        if not vData:
+            raise RestException(
+                'Format with the given name does not exist.', 404)
+
+        # TODO(opadron): Go through all video entries and files referencing
+        #                this format and remove them, too!
+
+        videoModel.remove(vData)
 
 
 def addFileRoutes(file):
@@ -44,21 +912,18 @@ def addFileRoutes(file):
         (
             'GET', (
                 ((':id', 'video'),                    'getVideo'),
-                ((':id', 'video', 'format'),          'getVideoFormats'),
-                ((':id', 'video', 'sourceFormat'),    'getSourceVideoFormat'),
-                ((':id', 'video', 'format', ':name'), 'getVideoFormatByName'),
+                ((':id', 'video', 'info'),            'fetchVideoData'),
                 ((':id', 'video', 'frame'),           'getVideoFrame'),
             )
         ),
         (
             'POST', (
                 ((':id', 'video'),                    'processVideo'),
-                ((':id', 'video', 'format'),          'addVideoFormat'),
+                ((':id', 'video', 'transcode'),       'convertVideo'),
             )
         ),
         (
             'DELETE', (
-                ((':id', 'video', 'format', ':name'), 'deleteVideoFormat'),
                 ((':id', 'video'),                    'deleteProcessedVideo'),
             )
         ),
@@ -72,629 +937,6 @@ def addFileRoutes(file):
 
 
 def createRoutes(file):
-    def ensureVideoUser(self):
-        userModel = self.model('user')
-
-        user = userModel.findOne({ 'login': 'internalvideouser' })
-        if not user:
-            user = userModel.createUser(
-                login='internalvideouser',
-                password='unused',
-                email='internal@video.user',
-                firstName='Internal',
-                lastName='Video User',
-                admin=True,
-                public=False
-            )
-
-            user['status'] = 'disabled'
-
-            user = userModel.save(user)
-
-        return user
-
-
-    def getFile(self, id, user=None, level=None):
-        if user is None:
-            user = getCurrentUser()
-
-        if level is None:
-            level = AccessType.READ
-
-        result = self.model('file').load(id, user=user, level=level)
-        return result
-
-
-    def getVideoData(
-            self, format=None, id=None, file=None,
-            user=None, level=None, ensure=False):
-        videodataModel = self.model('videodata', 'video')
-
-        if user is None:
-            user = getCurrentUser()
-
-        if level is None:
-            level = AccessType.WRITE
-
-        if file is None:
-            file = getFile(self, id, user=user)
-
-        data = None
-        if format is None:
-            data = videodataModel.findOne({
-                'fileId': file['_id'],
-                'sourceFileId': file['_id']
-            })
-
-            if not data and ensure:
-                data = videodataModel.createVideodata(fileId=file['_id'])
-        else:
-            data = videodataModel.findOne({
-                'sourceFileId': file['_id'],
-                'formatName': format
-            })
-
-            if not data and ensure:
-                data = videodataModel.createVideodata(
-                    sourceFileId=file['_id'], formatName=format)
-
-        if data:
-            data = videodataModel.load(data['_id'], user=user, level=level)
-
-        return data
-
-
-    def getCache(self,
-            format=None, id=None, data=None, user=None,
-            level=None, file=None, ensure=False):
-        fileModel = self.model('file')
-        folderModel = self.model('folder')
-        collectionModel = self.model('collection')
-        videodataModel = self.model('videodata', 'video')
-
-        cUser = user
-        if not cUser:
-            cUser = getCurrentUser()
-
-        vUser = ensureVideoUser(self)
-
-        if id is None:  # no video identified: ensure the main cache collection
-            cacheRoot = collectionModel.findOne({ 'name': '_videoCache' })
-            if not cacheRoot and ensure:
-                cacheRoot = collectionModel.createCollection(
-                    name='_videoCache',
-                    description='Video Cache',
-                    public=False,
-                    creator=vUser)
-
-            if cacheRoot:
-                cacheRoot = collectionModel.load(
-                    cacheRoot['_id'], level=level, user=vUser)
-
-            return cacheRoot
-
-        # video identified: ensure the cache for the given format
-
-        if file is None:
-            file = getFile(self, id, user=cUser)
-
-        if data is None:
-            data = getVideoData(
-                self, file=file, user=cUser,
-                level=AccessType.WRITE, ensure=True)
-
-        if format is None:  # no format identified: ensure the source cache
-            cacheRoot = getCache(
-                    self, id=None, level=AccessType.WRITE, ensure=ensure)
-
-            folder = None
-            if cacheRoot:
-                folder = folderModel.findOne({
-                    'parentId': cacheRoot['_id'], 'name': str(id) })
-
-                if not folder and ensure:
-                    folder = folderModel.createFolder(
-                        parent=cacheRoot,
-                        name=str(id),
-                        description='Video cache for file %s' % str(id),
-                        parentType='collection',
-                        public=False,
-                        creator=cUser,
-                        reuseExisting=True)
-
-                    acl = {
-                        'users': [{
-                            'id': cUser['_id'],
-                            'level': AccessType.ADMIN
-                        }]
-                    }
-
-                    folder = folderModel.setAccessList(
-                            folder, acl, user=vUser, save=True, force=True)
-
-                    data['cacheId'] = folder['_id']
-                    videodataModel.save(data)
-
-                    folder = folderModel.load(
-                        folder['_id'], level=level, user=cUser)
-
-            return folder
-
-        # video and format identified: ensure the given cache entry
-
-        formatData = getVideoData(
-            self, format=format, file=file, user=cUser,
-            level=AccessType.WRITE, ensure=True)
-
-        cache = getCache(
-            self, format=None, id=id, data=data,
-            level=AccessType.WRITE, file=file, ensure=ensure)
-
-        formatFolder = None
-        if cache:
-            if ensure:
-                formatsFolder = folderModel.load(
-                    folderModel.createFolder(
-                        parent=cache,
-                        name='formats',
-                        description='Format cache for file %s' % str(id),
-                        parentType='folder',
-                        public=False,
-                        creator=cUser,
-                        reuseExisting=True)['_id'],
-                    level=AccessType.WRITE,
-                    user=cUser)
-
-                formatFolder = folderModel.load(
-                    folderModel.createFolder(
-                        parent=formatsFolder,
-                        name=format,
-                        description=(
-                            'Cache for file %s(%s format)' % (str(id), format)),
-                        parentType='folder',
-                        public=False,
-                        creator=cUser,
-                        reuseExisting=True)['_id'],
-                    level=level,
-                    user=cUser)
-
-                formatData['cacheId'] = formatFolder['_id']
-                videodataModel.save(formatData)
-
-            else:
-                formatsFolder = folderModel.findOne({
-                    'parentId': cache['_id'], 'name': 'formats' })
-
-                if formatsFolder:
-                    formatFolder = folderModel.findOne({
-                        'parentId': formatsFolder['_id'], 'name': format })
-
-                    if formatFolder:
-                        formatFolder = folderModel.load(
-                            formatFolder['_id'], level=level, user=cUser)
-
-        return formatFolder
-
-
-    def cancelVideoJobs(self, id, format=None, user=None):
-        videojobModel = self.model('videojob', 'video')
-        jobModel = self.model('job', 'jobs')
-
-        cUser = user
-
-        if not cUser:
-            cUser = getCurrentUser()
-
-        canceledJobs = set()
-        query = (
-            { 'sourceFileId': ObjectId(id), 'formatName': format }
-            if format else
-            { '$or': [{ 'sourceFileId': ObjectId(id) },
-                      { 'fileId'      : ObjectId(id) }] }
-        )
-
-        for vJob in videojobModel.find(query):
-            vJob = videojobModel.load(
-                vJob['_id'], level=AccessType.WRITE, user=cUser)
-
-            job = jobModel.load(
-                vJob['jobId'], level=AccessType.WRITE, user=cUser)
-
-            try:
-                jobModel.cancelJob(job)
-                canceledJobs.add(str(job['_id']))
-            except ValidationException:
-                pass
-
-            videojobModel.remove(vJob)
-
-        return {
-            'message': 'Video processing jobs canceled.',
-            'fileId': id,
-            'canceledJobs': list(canceledJobs)
-        }
-
-
-    def removeVideoData(self, id, format=None, user=None):
-        folderModel = self.model('folder')
-        videodataModel = self.model('videodata', 'video')
-        videoframeModel = self.model('videoframe', 'video')
-
-        cUser = user
-
-        if not cUser:
-            cUser = getCurrentUser()
-
-        query = (
-            { 'sourceFileId': ObjectId(id), 'formatName': format }
-            if format else
-            { '$or': [{ 'sourceFileId': ObjectId(id) },
-                      { 'fileId'      : ObjectId(id) }] }
-        )
-
-        for vFrame in videoframeModel.find(query):
-            vFrame = videoframeModel.load(
-                vFrame['_id'], level=AccessType.WRITE, user=cUser)
-            videoframeModel.remove(vFrame)
-
-        vData = getVideoData(
-            self, format=format, id=id, user=cUser,
-            level=AccessType.WRITE, ensure=False)
-
-        folder = getCache(
-            self, format=format, id=id, user=cUser,
-            data=vData, level=AccessType.WRITE, ensure=False)
-
-        if folder:
-            folderModel.remove(folder)
-
-            vData['cacheId'] = None
-            videodataModel.save(vData)
-
-        for vData in videodataModel.find(query):
-            vData = videodataModel.load(
-                    vData['_id'], level=AccessType.WRITE, user=cUser)
-            if vData:
-                videodataModel.remove(vData)
-
-        return {
-            'message': 'Processed video data deleted.',
-            'fileId': id,
-            'cacheFolderId': folder['_id'] if folder else None
-        }
-
-
-    def analyzeVideo(self, id, force=False, format=None, user=None):
-        userToken = None
-
-        if user is None:
-            user, userToken = getCurrentUser(True)
-
-        fileModel = self.model('file')
-        folderModel = self.model('folder')
-        tokenModel = self.model('token')
-        jobModel = self.model('job', 'jobs')
-        videodataModel = self.model('videodata', 'video')
-        videojobModel = self.model('videojob', 'video')
-
-        file = getFile(self, id)
-        vData = getVideoData(
-            self, file=file, format=format, user=user, ensure=True)
-
-        vJob = videojobModel.findOne({
-            'type': 'analysis', 'fileId': vData['fileId'],
-            'sourceFileId': vData['sourceFileId'] })
-
-        jobId = (vJob or {}).get('jobId')
-
-        itemAlreadyProcessed = False
-        job = None
-        if jobId is not None:
-            job = jobModel.load(jobId, level=AccessType.READ, user=user)
-
-        if not force:
-            if job is not None:
-                status = job['status']
-                if status not in (
-                        None, JobStatus.ERROR, JobStatus.CANCELED):
-                    itemAlreadyProcessed = True
-
-            if itemAlreadyProcessed:
-                result = {
-                    'video': {
-                        'jobCreated': False,
-                        'message': 'Processing job already created.'
-                    }
-                }
-
-                result.update(job)
-                return result
-
-        # if we are *re*running a processing job (force=True), remove all data
-        # for this video that were created by the last processing jobs
-        if force and not format:
-            cancelVideoJobs(self, id, user=user)
-            removeVideoData(self, id, user=user)
-
-        # begin construction of the actual job
-        if not userToken:
-            # It seems like we should be able to use a token without USER_AUTH
-            # in its scope, but I'm not sure how.
-            userToken = tokenModel.createToken(
-                user, days=1, scope=TokenScope.USER_AUTH)
-
-        cache = getCache(
-            self, format=format, id=id, data=vData, user=user,
-            level=AccessType.WRITE, file=file, ensure=True)
-
-        targetFile = getFile(self, vData['fileId'], user=user)
-        analysis = folderModel.createFolder(
-            parent=cache,
-            name='analysis',
-            description='Analysis cache for file %s' % str(targetFile['_id']),
-            parentType='folder',
-            public=False,
-            creator=user,
-            reuseExisting=True)
-
-        jobTitle = '[video] Analysis'
-        job = jobModel.createJob(
-            title=jobTitle,
-            type='video',
-            user=user,
-            handler='worker_handler'
-        )
-        jobToken = jobModel.createJobToken(job)
-
-        job['kwargs'] = job.get('kwargs', {})
-        job['kwargs']['task'] = {
-            'mode': 'docker',
-
-            # TODO(opadron): replace this once we have a maintained
-            #                image on dockerhub
-            'docker_image': 'ffmpeg_local',
-            'pull_image': False,
-            'container_args': ['analyze'],
-            'inputs': [
-                {
-                    'id': 'input',
-                    'type': 'string',
-                    'format': 'text',
-                    'target': 'filepath'
-                }
-            ],
-            'outputs': [
-                {
-                    'id': 'meta',
-                    'type:': 'string',
-                    'format': 'text',
-                    'target': 'filepath',
-                    'path': '/mnt/girder_worker/data/meta.json'
-                },
-            ]
-        }
-
-        _, itemExt = os.path.splitext(targetFile['name'])
-
-        job['kwargs']['inputs'] = {
-            'input': workerUtils.girderInputSpec(
-                targetFile,
-                resourceType='file',
-                token=userToken,
-                name='input' + itemExt,
-                dataType='string',
-                dataFormat='text'
-            )
-        }
-
-        job['kwargs']['outputs'] = {
-            'meta': workerUtils.girderOutputSpec(
-                analysis,
-                parentType='folder',
-                token=userToken,
-                name='meta.json',
-                dataType='string',
-                dataFormat='text',
-                reference=(
-                    'videoPlugin:analysis:%s:%s' % (str(id), format)
-                    if format else
-                    'videoPlugin:analysis:%s' % str(id)
-                )
-            ),
-        }
-
-        job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
-            job=job,
-            token=jobToken,
-            logPrint=True)
-
-        job['meta'] = job.get('meta', {})
-        job['meta']['video_plugin'] = { 'fileId': id }
-
-        job = jobModel.save(job)
-        jobModel.scheduleJob(job)
-
-        videojobModel.createVideojob(
-            fileId=vData['fileId'],
-            sourceFileId=vData['sourceFileId'],
-            formatName=format,
-            type='analysis',
-            jobId=job['_id'])
-
-        videodataModel.save(vData)
-
-        result = {
-            'video': {
-                'jobCreated': True,
-                'message': 'Processing job created.'
-            }
-        }
-
-        result.update(job)
-        return result
-
-
-    def extractFrames(self, id, numFrames, format=None, user=None):
-        userToken = None
-
-        if user is None:
-            user, userToken = getCurrentUser(True)
-
-        fileModel = self.model('file')
-        folderModel = self.model('folder')
-        tokenModel = self.model('token')
-        jobModel = self.model('job', 'jobs')
-        videojobModel = self.model('videojob', 'video')
-
-        file = getFile(self, id, user=user)
-        vData = getVideoData(
-            self, format=format, file=file, user=user, level=AccessType.READ)
-
-        inputFile = file
-        if format:
-            inputFile = getFile(self, vData['fileId'], user=user)
-
-        if not userToken:
-            userToken = tokenModel.createToken(
-                user, days=1, scope=TokenScope.USER_AUTH)
-
-        cache = getCache(
-            self, format=format, id=id, data=vData, user=user,
-            level=AccessType.WRITE, file=file, ensure=True)
-
-        frames = folderModel.createFolder(
-            parent=cache,
-            name='frames',
-            description='Frame cache for file %s' % str(inputFile['_id']),
-            parentType='folder',
-            public=False,
-            creator=user,
-            reuseExisting=True)
-
-        jobTitle = '[video] Frame Extraction'
-        job = jobModel.createJob(
-            title=jobTitle,
-            type='video',
-            user=user,
-            handler='worker_handler'
-        )
-        jobToken = jobModel.createJobToken(job)
-
-        job['kwargs'] = job.get('kwargs', {})
-        job['kwargs']['task'] = {
-            'mode': 'docker',
-
-            # TODO(opadron): replace this once we have a maintained
-            #                image on dockerhub
-            'docker_image': 'ffmpeg_local',
-            'pull_image': False,
-            'container_args': ['extract', str(numFrames)],
-            'inputs': [
-                {
-                    'id': 'input',
-                    'type': 'string',
-                    'format': 'text',
-                    'target': 'filepath'
-                }
-            ],
-            'outputs': [
-                {
-                    'id': 'frame%d' % index,
-                    'type:': 'string',
-                    'format': 'text',
-                    'target': 'filepath',
-                    'path': '/mnt/girder_worker/data/%d.png' % (index + 1)
-                }
-                for index in range(numFrames)
-            ]
-        }
-
-        _, itemExt = os.path.splitext(inputFile['name'])
-
-        job['kwargs']['inputs'] = {
-            'input': workerUtils.girderInputSpec(
-                inputFile,
-                resourceType='file',
-                token=userToken,
-                name='input' + itemExt,
-                dataType='string',
-                dataFormat='text'
-            )
-        }
-
-        job['kwargs']['outputs'] = dict(
-            (
-                'frame%d' % index,
-                workerUtils.girderOutputSpec(
-                    frames,
-                    parentType='folder',
-                    token=userToken,
-                    name='%d.png' % index,
-                    dataType='string',
-                    dataFormat='text',
-                    reference=(
-                        'videoPlugin:frame:%s:%s:%d' % (format, str(id), index)
-                        if format else
-                        'videoPlugin:frame:%s:%d' % (str(id), index)
-                    )
-                )
-            )
-            for index in range(numFrames)
-        )
-
-        job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
-            job=job,
-            token=jobToken,
-            logPrint=True)
-
-        job = jobModel.save(job)
-        jobModel.scheduleJob(job)
-
-        vJob = None
-        if format is not None:
-            vJob = videojobModel.createVideojob(
-                sourceFileId=id, type='frameExtraction',
-                formatName=format, jobId=job['_id'])
-        else:
-            vJob = videojobModel.createVideojob(
-                fileId=id, type='frameExtraction', jobId=job['_id'])
-
-        result = {
-            'video': {
-                'jobCreated': True,
-                'message': 'Frame extraction job created.'
-            }
-        }
-
-        result.update(job)
-        return result
-
-    def _getVideoFormatByName(self, id, name, params):
-        videodataModel = self.model('videodata', 'video')
-        user = getCurrentUser()
-
-        result = None
-        if name:
-            result = videodataModel.findOne({
-                'sourceFileId': ObjectId(id), 'formatName': name })
-        else:
-            result = videodataModel.findOne({ 'fileId': ObjectId(id) })
-
-        if result:
-            result = videodataModel.load(
-                result['_id'], level=AccessType.READ, user=user)
-
-        if result:
-            result = {
-                'metadata': result['metadata'],
-                'name': (result['formatName'] if name else '[SOURCE]')
-            }
-
-            return result
-
-        raise RestException('No such video format', 404)
-
-
     @autoDescribeRoute(
         Description('Return video stream.')
         .param('id', 'Id of the file.', paramType='path')
@@ -716,17 +958,27 @@ def createRoutes(file):
     @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
     def getVideo(self, id, params):
-        fileModel = self.model('file')
         format = params.get('format')
+
+        id = ObjectId(id)
+
+        formatId = None
+        if format:
+            formatId = _getVideoFormatByName(self, format)['_id']
 
         sourceFile = getFile(self, id)
 
         vData = getVideoData(
-            self, format=format, file=sourceFile,
-            ensure=False, level=AccessType.READ)
+            self, fileId=id, formatId=formatId, ensure=False)
 
         if not vData:
-            raise RestException('No such video format', 404)
+            msg = 'No source video found'
+            if format:
+                msg = (
+                    "Source video has not been "
+                    "transcoded to format: '{}'".format(format))
+
+            raise RestException(msg, 404)
 
         targetFile = getFile(self, vData['fileId'])
 
@@ -736,61 +988,33 @@ def createRoutes(file):
 
 
     @autoDescribeRoute(
-        Description('Return the list of alternate video formats.')
+        Description('Return the data for the given video.')
         .param('id', 'Id of the file.', paramType='path')
+        .param('format',
+               'Name of the format, or leave blank for the source video.',
+               required=False)
         .errorResponse()
+        .errorResponse('Format not found.', 404)
         .errorResponse('Read access was denied on the file.', 403)
     )
     @access.cookie
     @access.public(scope=TokenScope.DATA_READ)
     @boundHandler(file)
-    def getVideoFormats(self, id, params):
-        videodataModel = self.model('videodata', 'video')
-        user = getCurrentUser()
+    def fetchVideoData(self, id, params):
+        file = getFile(self, id)
 
-        result = [
-            {
-                'name': x['formatName'],
-                'metadata': x['metadata']
-            }
-            for x in (
-                videodataModel.load(vData['_id'], level=AccessType.READ, user=user)
-                for vData in videodataModel.find(
-                    { 'sourceFileId': ObjectId(id) })
-            )
-            if str(x['fileId']) != str(x['sourceFileId'])
-        ]
+        format = params.get('format')
+        formatId = None
+        if format:
+            formatId = _getVideoFormatByName(format)['_id']
 
+        result = getVideoData(self, fileId=file['_id'], formatId=formatId)
+        result.pop('_id', None)
+        result.pop('fileId', None)
+        result.pop('sourceFileId', None)
+        result.pop('formatId', None)
+        result.pop('type', None)
         return result
-
-
-    @autoDescribeRoute(
-        Description('Return the source video format.')
-        .param('id', 'Id of the file.', paramType='path')
-        .errorResponse()
-        .errorResponse('Read access was denied on the file.', 403)
-        .errorResponse('No such video format.', 404)
-    )
-    @access.cookie
-    @access.public(scope=TokenScope.DATA_READ)
-    @boundHandler(file)
-    def getSourceVideoFormat(self, id, params):
-        return _getVideoFormatByName(self, id, None, params)
-
-
-    @autoDescribeRoute(
-        Description('Return the named alternate video format.')
-        .param('id', 'Id of the file.', paramType='path')
-        .param('name', 'Name of the alternate video format.', paramType='path')
-        .errorResponse()
-        .errorResponse('Read access was denied on the file.', 403)
-        .errorResponse('No such video format.', 404)
-    )
-    @access.cookie
-    @access.public(scope=TokenScope.DATA_READ)
-    @boundHandler(file)
-    def getVideoFormatByName(self, id, name, params):
-        return _getVideoFormatByName(self, id, name, params)
 
 
     @autoDescribeRoute(
@@ -836,7 +1060,9 @@ def createRoutes(file):
         index = params.get('index')
 
         fileModel = self.model('file')
-        videoframeModel = self.model('videoframe', 'video')
+        videoModel = self.model('video', 'video')
+
+        id = ObjectId(id)
 
         count = sum(x is not None for x in (percent, time, index))
 
@@ -845,27 +1071,32 @@ def createRoutes(file):
                 'Must provide no more than one of either '
                 'percent, time, or index')
 
-        vData = getVideoData(self, format=format, id=id, level=AccessType.READ)
+        formatId = None
+        if format:
+            formatId = _getVideoFormatByName(self, format)['_id']
+
+        vData = getVideoData(
+            self, fileId=id, formatId=formatId)
+
+        if not vData:
+            raise RestException('Video data not found', 404)
 
         frameCount = None
         duration = None
         if percent is not None or time is not None:
-            frameCount = (
-                vData
-                    .get('metadata', {})
-                    .get('video', {})
-                    .get('frameCount', 0))
+            frameCount = vData.get('videoFrameCount', 0)
 
             if not frameCount:
-                raise RestException('Missing metadata from format: frameCount')
+                raise RestException(
+                    'Missing data from video: videoFrameCount')
 
             frameCount = int(frameCount)
 
             if time is not None:
-                duration = vData.get('metadata', {}).get('duration')
+                duration = vData.get('duration')
                 if duration is None:
                     raise RestException(
-                        'Missing metadata from format: duration')
+                        'Missing data from video: duration')
 
                 duration = float(duration)
 
@@ -916,28 +1147,20 @@ def createRoutes(file):
 
         index = int(index)
 
-        query = (
-            {
-                '$and': [
-                    { 'sourceFileId': ObjectId(id), 'formatName': format }
-                    if format else
-                    { '$or': [{ 'sourceFileId': ObjectId(id) },
-                              { 'fileId'      : ObjectId(id) }] },
+        query = {
+            'type': VideoEnum.FRAME,
+            'sourceFileId': id,
+            'formatId': formatId,
+            'index': index
+        }
 
-                    { 'index': index }
-                ]
-            }
-        )
-
-        frame = videoframeModel.findOne(query)
+        frame = videoModel.findOne(query)
         if frame:
-            file = fileModel.findOne({ 'itemId': frame['itemId'] })
-            if file:
-                return self.download(id=str(file['_id']), params=dict(
-                    item for item in params.items() if item[1] is not None
-                ))
+            return self.download(id=str(frame['fileId']), params=dict(
+                item for item in params.items() if item[1] is not None
+            ))
 
-        raise RestException('Frame not found.', 404)
+        raise RestException('Frame not found.' + ' ' + str(query), 404)
 
 
     @autoDescribeRoute(
@@ -979,249 +1202,21 @@ def createRoutes(file):
 
 
     @autoDescribeRoute(
-        Description('Add a new format for the given video.')
+        Description('Transcode a video into a new format.')
         .param('id', 'Id of the file.', paramType='path')
-        .param('name', 'Name for the new format.', required=True)
+        .param('format', 'Name of the format.', required=True)
         .param('force', 'Force the creation of a new job.', required=False,
             dataType='boolean', default=False)
-        .param('dimensions', 'Dimensions of the video.', required=False)
-        .param('videoCodec', 'Video codec for the video.',
-            required=False, enum=['VP9'], default='VP9')
-        .param('audioCodec', 'Audio codec for the video.',
-            required=False, enum=['OPUS'], default='OPUS')
-        .param(
-            'audioSampleRate',
-            'Sampling rate for the video audio.',
-            required=False)
-        .param('audioBitRate', 'Bit rate for the video audio.', required=False)
-        .param('videoBitRate', 'Bit rate for the video.', required=False)
         .errorResponse()
         .errorResponse('Read access was denied on the file.', 403)
     )
     @access.public
     @boundHandler(file)
-    def addVideoFormat(self, id, name, params):
-        force = params['force']
-        user, userToken = getCurrentUser(True)
+    def convertVideo(self, id, format, params):
+        formatId = _getVideoFormatByName(self, format)['_id']
+        return transcodeVideo(
+            self, id, formatId, force=params.get('force', False))
 
-        fileModel = self.model('file')
-        folderModel = self.model('folder')
-        tokenModel = self.model('token')
-        jobModel = self.model('job', 'jobs')
-        videodataModel = self.model('videodata', 'video')
-        videojobModel = self.model('videojob', 'video')
-
-        file = getFile(self, id)
-        originalFileName, _ = os.path.splitext(file['name'])
-
-        metadata = getVideoData(self, file=file, ensure=True).get('metadata')
-
-        video = metadata.get('video', {})
-        audio = metadata.get('audio', {})
-
-        videoCodec = params.get('videoCodec')
-        audioCodec = params.get('audioCodec')
-
-        dimensions = params.get('dimensions')
-        if not dimensions:
-            width = video.get('width')
-            height = video.get('height', 0)
-
-            if width and height:
-                dimensions = '%dx%d' % (width, height)
-
-        audioSampleRate = params.get('audioSampleRate', audio.get('sampleRate'))
-        audioBitRate = params.get('audioBitRate', audio.get('bitRate'))
-        videoBitRate = params.get('videoBitRate', video.get('bitRate'))
-
-        vData = getVideoData(self, file=file, format=name, ensure=True)
-
-        vJob = videojobModel.findOne({
-            'type': 'transcoding',
-            'sourceFileId': ObjectId(id),
-            'formatName': name })
-
-        jobId = (vJob or {}).get('jobId')
-
-        itemAlreadyProcessed = False
-        job = None
-        if jobId is not None:
-            job = jobModel.load(jobId, level=AccessType.READ, user=user)
-
-        if not force:
-            if job is not None:
-                status = job['status']
-                if status not in (
-                        None, JobStatus.ERROR, JobStatus.CANCELED):
-                    itemAlreadyProcessed = True
-
-            if itemAlreadyProcessed:
-                result = {
-                    'video': {
-                        'jobCreated': False,
-                        'message': 'Processing job already created.'
-                    }
-                }
-
-                result.update(job)
-                return result
-
-        # if we are *re*running a processing job (force=True), remove all data
-        # for this video that were created by the last processing jobs
-        if force:
-            cancelVideoJobs(self, id, format=name, user=user)
-            removeVideoData(self, id, format=name, user=user)
-
-        # begin construction of the actual job
-        if not userToken:
-            userToken = tokenModel.createToken(
-                user, days=1, scope=TokenScope.USER_AUTH)
-
-        cache = getCache(
-            self, format=name, id=id, data=vData,
-            level=AccessType.WRITE, file=file, ensure=True)
-
-        transcodingFolder = folderModel.createFolder(
-            parent=cache,
-            name='transcoding',
-            description='Transcoding cache for file %s, format %s' % (
-                str(id), name),
-            parentType='folder',
-            public=False,
-            creator=user,
-            reuseExisting=True)
-
-        jobTitle = '[video] Transcoding'
-        job = jobModel.createJob(
-            title=jobTitle,
-            type='video',
-            user=user,
-            handler='worker_handler'
-        )
-        jobToken = jobModel.createJobToken(job)
-
-        container_args = ['transcode']
-
-        for code, val in (('VCODEC', videoCodec),
-                          ('ACODEC', audioCodec),
-                          ('DIMENSIONS', dimensions),
-                          ('ASRATE', audioSampleRate),
-                          ('ABRATE', audioBitRate),
-                          ('VBRATE', videoBitRate)):
-            if val:
-                container_args.extend([code, val])
-
-        # TODO(opadron): add more options
-        fileExtension = None
-        if videoCodec == 'VP9':
-            fileExtension = 'webm'
-        else:
-            fileExtension = 'webm'
-
-        job['kwargs'] = job.get('kwargs', {})
-        job['kwargs']['task'] = {
-            'mode': 'docker',
-
-            # TODO(opadron): replace this once we have a maintained
-            #                image on dockerhub
-            'docker_image': 'ffmpeg_local',
-            'pull_image': False,
-            'container_args': container_args + [fileExtension],
-            'inputs': [
-                {
-                    'id': 'input',
-                    'type': 'string',
-                    'format': 'text',
-                    'target': 'filepath'
-                }
-            ],
-            'outputs': [
-                {
-                    'id': 'output',
-                    'type:': 'string',
-                    'format': 'text',
-                    'target': 'filepath',
-                    'path': '/mnt/girder_worker/data/output.%s' % fileExtension
-                },
-            ]
-        }
-
-        _, itemExt = os.path.splitext(file['name'])
-
-        job['kwargs']['inputs'] = {
-            'input': workerUtils.girderInputSpec(
-                file,
-                resourceType='file',
-                token=userToken,
-                name='input' + itemExt,
-                dataType='string',
-                dataFormat='text'
-            )
-        }
-
-        job['kwargs']['outputs'] = {
-            'output': workerUtils.girderOutputSpec(
-                transcodingFolder,
-                parentType='folder',
-                token=userToken,
-                name='%s_%s.%s' % (originalFileName, name, fileExtension),
-                dataType='string',
-                dataFormat='text',
-                reference='videoPlugin:transcoding:%s:%s' % (str(id), name)
-            )
-        }
-
-        job['kwargs']['jobInfo'] = workerUtils.jobInfoSpec(
-            job=job,
-            token=jobToken,
-            logPrint=True)
-
-        job['meta'] = job.get('meta', {})
-        job['meta']['video_plugin'] = { 'fileId': id }
-
-        job = jobModel.save(job)
-        jobModel.scheduleJob(job)
-
-        videojobModel.createVideojob(
-            sourceFileId=id, type='transcoding',
-            formatName=name, jobId=job['_id'])
-
-        videodataModel.save(vData)
-
-        result = {
-            'video': {
-                'jobCreated': True,
-                'message': 'Processing job created.'
-            }
-        }
-
-        result.update(job)
-        return result
-
-
-    @autoDescribeRoute(
-        Description('Remove a format from the given video.')
-        .param('id', 'Id of the file.', paramType='path')
-        .param('name', 'Name for the new format.', paramType='path')
-        .errorResponse()
-        .errorResponse('Read access was denied on the file.', 403)
-    )
-    @access.public
-    @boundHandler(file)
-    def deleteVideoFormat(self, id, name, params):
-        cancelResponse = cancelVideoJobs(self, id, format=name)
-        removeResponse = removeVideoData(self, id, format=name)
-
-        cancelResponse.pop('message', None)
-        removeResponse.pop('message', None)
-        removeResponse.pop('fileId', None)
-
-        response = {}
-        response.update(cancelResponse)
-        response.update(removeResponse)
-        response['message'] = 'Processed video format data deleted.'
-
-        return response
 
     def wrap(fun):
         @wraps(fun)
@@ -1232,22 +1227,17 @@ def createRoutes(file):
     return {
         'utilities': {
             'analyzeVideo'     : wrap(analyzeVideo),
-            'ensureVideoUser'  : wrap(ensureVideoUser),
             'extractFrames'    : wrap(extractFrames),
             'getFile'          : wrap(getFile),
             'getVideoData'     : wrap(getVideoData),
-            'getCache'         : wrap(getCache),
             'cancelVideoJobs'  : wrap(cancelVideoJobs),
             'removeVideoData'  : wrap(removeVideoData),
+            'transcodeVideo'   : wrap(transcodeVideo),
         },
-        'getSourceVideoFormat' : getSourceVideoFormat,
         'getVideo'             : getVideo,
-        'getVideoFormats'      : getVideoFormats,
-        'getVideoFormatByName' : getVideoFormatByName,
+        'fetchVideoData'       : fetchVideoData,
         'getVideoFrame'        : getVideoFrame,
         'processVideo'         : processVideo,
-        'addVideoFormat'       : addVideoFormat,
-        'deleteVideoFormat'    : deleteVideoFormat,
         'deleteProcessedVideo' : deleteProcessedVideo,
+        'convertVideo'         : convertVideo,
     }
-
