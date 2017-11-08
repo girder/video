@@ -58,3 +58,9 @@ class VideoEnum:
     TRANSCODING      = 1 << 11
     FRAME_EXTRACTION = 1 << 12
 
+class VideoEvents:
+    """Enum type for Video plugin events"""
+    ANALYZE          = 'video.analyze'
+    FRAME_EXTRACT    = 'video.frame.extract'
+    FILE_UPLOADED    = 'data.process'
+    FILE_DELETED     = 'model.file.remove'
