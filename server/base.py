@@ -28,7 +28,9 @@ from bson.objectid import ObjectId
 
 from girder import events, plugin, logger
 from girder.constants import AccessType, SettingDefault
-from girder.models.model_base import ModelImporter, ValidationException
+from girder.models.model_base import ModelImporter, \
+                                     GirderException, \
+                                     ValidationException
 from girder.utility import setting_utilities
 
 from . import constants
@@ -234,8 +236,90 @@ SettingDefault.defaults.update({
 })
 
 
-# Configuration and load
+# Monkey-patch the Item model
+#
+# Since we use girder worker to generate data that we'd prefer to keep hidden,
+# and Girder currently does not support uploading directly into a hidden file,
+# we figured the best workaround is to extend to items the same attaching
+# semantics that have been recently added to files, and to use a hidden item as
+# the target for all uploads.
+#
+# TODO(opadron): remove this once better attaching support is merged into
+#                master.
+def itemCreateItem(self, *args, **kwargs):
+    creator = kwargs.get('creator', (args + (None,)*2)[1])
 
+    attachedToId = kwargs.get('attachedToId')
+    attachedToType = kwargs.get('attachedToType')
+
+    if attachedToId and attachedToType:
+        attachedToId = ObjectId(attachedToId)
+        import datetime
+
+        now = datetime.datetime.utcnow()
+
+        hidden = kwargs.get('hidden', False)
+
+        if not isinstance(creator, dict) or '_id' not in creator:
+            # Internal error -- this shouldn't be called without a user.
+            raise GirderException('Creator must be a user.',
+                                  'girder.models.item.creator-not-user')
+
+        doc = {
+            'name': '',
+            'description': '',
+            'creatorId': creator['_id'],
+            'baseParentType': None,
+            'baseParentId': None,
+            'attachedToId': attachedToId,
+            'attachedToType': attachedToType,
+            'created': now,
+            'updated': now,
+            'size': 0
+        }
+
+        if hidden:
+            doc = self.collection.find_and_modify(
+                { 'creatorId': creator['_id'],
+                  'attachedToId': attachedToId,
+                  'attachedToType': attachedToType },
+                { '$set': doc },
+                new=True,
+                upsert=True
+            )
+            return doc
+
+        return self.save(doc)
+
+    return self._originalCreateItem(*args, **kwargs)
+
+
+def createHiddenItem(self, user):
+    return self.createItem(attachedToId=user['_id'],
+                           attachedToType='user',
+                           creator=user,
+                           hidden=True)
+
+
+def itemIsOrphan(self, item):
+    return (
+        ModelImporter('file').isOrphan(item) if item.get('attachedToId') else
+        self._originalIsOrphan(item)
+    )
+
+
+def itemValidate(self, doc):
+    attachedToId = doc.get('attachedToId')
+    attachedToType = doc.get('attachedToType')
+
+    if attachedToId and attachedToType:
+        doc['lowerName'] = doc['name'].lower()
+        return doc
+
+    return self._originalValidate(self, doc)
+
+
+# Configuration and load
 @plugin.config(
     name='Video',
     description='Process, serve, and display videos.',
@@ -249,8 +333,24 @@ def load(info):
     routeTable = addFileRoutes(info['apiRoot'].file)
     videoUtilities = routeTable['utilities']
 
-    ModelImporter.model('file').exposeFields(
-        level=AccessType.READ, fields='video')
+    ModelImporter.model('file').ensureIndices([
+        'attachedToType', 'attachedToId'])
+
+    ModelImporter.model('item').ensureIndices([
+        'attachedToType', 'attachedToId'])
+
+    from girder.models.item import Item
+    (
+        Item._originalCreateItem, Item.createItem,
+        Item._originalIsOrphan  , Item.isOrphan  ,
+        Item._originalValidate  , Item.validate
+    ) = (
+        Item.createItem, itemCreateItem,
+        Item.isOrphan  , itemIsOrphan  ,
+        Item.validate  , itemValidate
+    )
+
+    Item.createHiddenItem = createHiddenItem
 
     events.bind('data.process', 'video', _postUpload)
     events.bind('model.file.remove', 'video', _deleteVideoData)
