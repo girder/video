@@ -47,3 +47,10 @@ class JobStatus:
 
 JobStatus = JobStatus()
 
+class VideoModelType:
+    """Enum type for Video models"""
+    FILE   = 'FILE'
+    FORMAT = 'FORMAT'
+    FRAME  = 'FRAME'
+    JOB    = 'JOB'
+
