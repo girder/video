@@ -24,7 +24,7 @@ from girder.models.model_base import ModelImporter
 
 from .helpers import helpers
 from .utils import objectIdOrNone
-from .constants import VideoEnum
+from .constants import VideoEnum, VideoEvents
 
 
 def onFrames(event):
@@ -103,7 +103,7 @@ def onFileUpload(event):
         numFrames = int(vData.get('videoFrameCount', 0))
         if numFrames:
             events.daemon.trigger(
-                'frameExtract',
+                VideoEvents.FRAME_EXTRACT,
                 {
                     'fileId': referencedFileId,
                     'numFrames': numFrames,
@@ -135,7 +135,7 @@ def onFileUpload(event):
         videoModel.save(vData)
 
         events.daemon.trigger(
-            'videoAnalyze',
+            VideoEvents.ANALYZE,
             {
                 'fileId': referencedFileId,
                 'user': event.info['currentUser'],

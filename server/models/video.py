@@ -275,10 +275,11 @@ class Video(Model):
             'fileId', 'index', 'jobId', 'sourceFileId', 'type'])
 
         self.exposeFields(level=AccessType.READ, fields={
-            '_id', 'fileId', 'index', 'jobId', 'sourceFileId', 'type',
-            'name', 'formatId', 'audioBitRate', 'audioSampleRate', 'duration',
-            'videoWidth', 'videoFrameCount', 'videoHeight', 'videoBitRate',
-            'videoFrameRate'})
+            '_id', 'fileId', 'index', 'jobId', 'sourceFileId', 'type', 'name',
+            'formatId', 'jobType', 'audioBitRate', 'audioChannelCount',
+            'audioChannelLayout', 'audioCodec', 'audioSampleFormat',
+            'audioSampleRate', 'duration', 'videoCodec', 'videoWidth',
+            'videoFrameCount', 'videoHeight', 'videoBitRate', 'videoFrameRate'})
 
     def validate(self, data):
         # TODO(opadron): write the different validations

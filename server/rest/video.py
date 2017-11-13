@@ -121,20 +121,26 @@ def addFileRoutes(file):
     routeTable = (
         (
             'GET', (
-                ((':id', 'video'),               'getVideo'),
-                ((':id', 'video', 'info'),       'getVideoData'),
-                ((':id', 'video', 'frame'),      'getVideoFrame'),
+                ((':id', 'video'),                  'getVideo'),
+                ((':id', 'video', 'stream'),        'getVideo'),
+                ((':id', 'video', 'metadata'),      'getVideoData'),
+                ((':id', 'video', 'frame'),         'getVideoFrame'),
             )
         ),
         (
-            'POST', (
-                ((':id', 'video'),               'analyzeVideo'),
-                ((':id', 'video', 'transcode'),  'transcodeVideo'),
+            'PUT', (
+                ((':id', 'video'),                  'analyzeVideo'),
+                ((':id', 'video', 'analysis'),      'analyzeVideo'),
+                ((':id', 'video', 'transcoding'),   'transcodeVideo'),
+                ((':id', 'video', 'extraction'),    'extractFrames'),
             )
         ),
         (
             'DELETE', (
-                ((':id', 'video'),               'deleteProcessedVideo'),
+                ((':id', 'video'),                  'deleteVideoAnalysis'),
+                ((':id', 'video', 'analysis'),      'deleteVideoAnalysis'),
+                ((':id', 'video', 'transcoding'),   'deleteVideoTranscoding'),
+                ((':id', 'video', 'extraction'),    'deleteVideoFrames'),
             )
         ),
     )
@@ -374,7 +380,7 @@ def createRoutes(file):
 
 
     @autoDescribeRoute(
-        Description('Create a girder-worker job to process the given video.')
+        Description('Create a girder-worker job to analyze the given video.')
         .param('id', 'Id of the file.', paramType='path')
         .param('force', 'Force the creation of a new job.', required=False,
             dataType='boolean', default=False)
@@ -391,14 +397,28 @@ def createRoutes(file):
 
 
     @autoDescribeRoute(
-        Description('Delete the processed results from the given video.')
+        Description('Delete the analysis results from the given video.')
         .param('id', 'Id of the file.', paramType='path')
+        .param('format',
+               'Restrict the data removal to the given format. '
+               'If provided, only the copy that was transcoded into the '
+               'given format and their extracted frames are removed.',
+               required=False)
+        .notes(
+            '&middot; Also deletes all extracted frames, all transcoded '
+            'copies, their analysis results, and their extracted frames.'
+            '<br>'
+            '&middot; This endpoint will <strong>never</strong> delete the '
+            'source video file. To delete all video-related data, as well as '
+            'the source file, use <a href="#!/file/file_deleteFile">'
+            'DELETE /file/:id</a>.'
+        )
         .errorResponse()
         .errorResponse('Write access was denied on the file.', 403)
     )
     @access.public
     @boundHandler(file)
-    def deleteProcessedVideo(self, id, params):
+    def deleteVideoAnalysis(self, id, params):
         sourceId, targetId, formatId = helpers.resolveFileId(self, id)
 
         cancelResponse = helpers.cancelVideoJobs(
@@ -419,11 +439,94 @@ def createRoutes(file):
 
 
     @autoDescribeRoute(
+        Description('Delete the transcoded version of the given video.')
+        .notes('Also deletes all frames extracted from the transcoded version.')
+        .param('id', 'Id of the source file.', paramType='path')
+        .param('format',
+               'The format for which the transcoded version should be deleted.',
+               required=True)
+        .notes('This endpoint will never delete the source video file. '
+               'To delete all video-related data, as well as the source file, '
+                '<a href="#!/file/file_deleteFile">DELETE /file/:id</a>.')
+        .errorResponse()
+        .errorResponse('Write access was denied on the file.', 403)
+    )
+    @access.public
+    @boundHandler(file)
+    def deleteVideoTranscoding(self, id, params):
+        sourceId, targetId, formatId = helpers.resolveFileId(
+            self, id, formatName=params.get('format'))
+
+        cancelResponse = helpers.cancelVideoJobs(
+            self, sourceId, formatId=formatId,
+            mask=VideoEnum.TRANSCODING | VideoEnum.FRAME_EXTRACTION,
+            cascade=False)
+
+        removeResponse = helpers.removeVideoData(
+            self, sourceId, formatId=formatId,
+            mask=VideoEnum.FILE | VideoEnum.FRAME,
+            cascade=False)
+
+        cancelResponse.pop('message', None)
+        removeResponse.pop('message', None)
+        removeResponse.pop('fileId', None)
+
+        response = {}
+        response.update(cancelResponse)
+        response.update(removeResponse)
+        response['message'] = 'Processed video data deleted.'
+
+        return response
+
+
+    @autoDescribeRoute(
+        Description('Delete the extracted frames from the given video.')
+        .param('id', 'Id of the source file.', paramType='path')
+        .param('format',
+               'The format for which the extracted frames should be deleted, '
+               'or if blank, remove the frames extracted from the source '
+               'video.',
+               required=False)
+        .notes('This endpoint will never delete the source video file. '
+               'To delete all video-related data, as well as the source file, '
+                '<a href="#!/file/file_deleteFile">DELETE /file/:id</a>.')
+        .errorResponse()
+        .errorResponse('Write access was denied on the file.', 403)
+    )
+    @access.public
+    @boundHandler(file)
+    def deleteVideoFrames(self, id, params):
+        sourceId, targetId, formatId = helpers.resolveFileId(
+            self, id, formatName=params.get('format'))
+
+        cancelResponse = helpers.cancelVideoJobs(
+            self, sourceId, formatId=formatId,
+            mask=VideoEnum.FRAME_EXTRACTION,
+            cascade=False)
+
+        removeResponse = helpers.removeVideoData(
+            self, sourceId, formatId=formatId,
+            mask=VideoEnum.FRAME,
+            cascade=False)
+
+        cancelResponse.pop('message', None)
+        removeResponse.pop('message', None)
+        removeResponse.pop('fileId', None)
+
+        response = {}
+        response.update(cancelResponse)
+        response.update(removeResponse)
+        response['message'] = 'Processed video data deleted.'
+
+        return response
+
+
+    @autoDescribeRoute(
         Description('Transcode a video into a new format.')
         .param('id', 'Id of the file.', paramType='path')
         .param('format', 'Name of the format.', required=True)
-        .param('force', 'Force the creation of a new job.', required=False,
-            dataType='boolean', default=False)
+        .param('force', 'Force the creation of a new transcoding job.',
+            required=False, dataType='boolean', default=False)
         .errorResponse()
         .errorResponse('Read access was denied on the file.', 403)
     )
@@ -437,11 +540,45 @@ def createRoutes(file):
             self, sourceId, formatId=formatId,
             force=params.get('force', False))
 
+
+    @autoDescribeRoute(
+        Description('Extract the frames from a video.')
+        .param('id', 'Id of the file.', paramType='path')
+        .param('format',
+               'Name of the format, or leave blank for the source video.',
+               required=False)
+        .param('force', 'Force the creation of a new job.', required=False,
+            dataType='boolean', default=False)
+        .errorResponse()
+        .errorResponse('Read access was denied on the file.', 403)
+    )
+    @access.public
+    @boundHandler(file)
+    def extractFrames(self, id, params):
+        sourceId, targetId, formatId = helpers.resolveFileId(
+                self, id, formatName=params.get('format'))
+
+        vData = helpers.getVideoData(self, fileId=sourceId, formatId=formatId)
+        if not vData:
+            raise RestException('Video data not found', 404)
+
+        frameCount = vData.get('videoFrameCount', 0)
+        if not frameCount:
+            raise RestException(
+                'Missing data from video: videoFrameCount')
+
+        return helpers.extractFrames(
+            self, sourceId, frameCount,
+            formatId=formatId, force=params.get('force', False))
+
     return {
-        'getVideo'             : getVideo,
-        'getVideoData'         : getVideoData,
-        'getVideoFrame'        : getVideoFrame,
-        'analyzeVideo'         : analyzeVideo,
-        'deleteProcessedVideo' : deleteProcessedVideo,
-        'transcodeVideo'       : transcodeVideo,
+        'getVideo'              : getVideo,
+        'getVideoData'          : getVideoData,
+        'getVideoFrame'         : getVideoFrame,
+        'analyzeVideo'          : analyzeVideo,
+        'transcodeVideo'        : transcodeVideo,
+        'extractFrames'         : extractFrames,
+        'deleteVideoAnalysis'   : deleteVideoAnalysis,
+        'deleteVideoTranscoding': deleteVideoTranscoding,
+        'deleteVideoFrames'     : deleteVideoFrames
     }

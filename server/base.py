@@ -110,7 +110,6 @@ SettingDefault.defaults.update({
     dependencies={'worker'},
 )
 def load(info):
-    global videoUtilities
     from .rest import addFileRoutes, Video
     from .helpers import initHelpers
 

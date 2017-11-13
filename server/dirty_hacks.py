@@ -12,6 +12,10 @@ def patchItemModel():
 
     TODO(opadron): remove this once better attaching support is merged in
     """
+    from girder.models.model_base import GirderException
+    from girder.models.item import Item
+    from .utils import objectIdOrNone
+
     def createItem(self, *args, **kwargs):
         """Hacked version of itemModel.createItem()."""
         creator = kwargs.get('creator', (args + (None,)*2)[1])
@@ -20,7 +24,7 @@ def patchItemModel():
         attachedToType = kwargs.get('attachedToType')
 
         if attachedToId and attachedToType:
-            attachedToId = ObjectId(attachedToId)
+            attachedToId = objectIdOrNone(attachedToId)
             import datetime
 
             now = datetime.datetime.utcnow()
@@ -96,8 +100,6 @@ def patchItemModel():
                                creator=user,
                                hidden=True)
 
-    from girder.models.item import Item
-
     Item._originalCreateItem = Item.createItem
     Item._originalIsOrphan   = Item.isOrphan
     Item._originalValidate   = Item.validate
@@ -130,6 +132,8 @@ def patchUploadModel():
           the actual upload, allowing the future configuration of how the
           video plugin stores transcoded videos and extracted frames.
     """
+    import json
+    from girder.models.upload import Upload
 
     def createUpload(self, *args, **kwargs):
         """Hacked version of uploadModel.createUpload()"""
@@ -146,8 +150,6 @@ def patchUploadModel():
             kwargs.update(customPayload)
 
         return self._originalCreateUpload(*args, **kwargs)
-
-    from girder.models.upload import Upload
 
     Upload._originalCreateUpload = Upload.createUpload
     Upload.createUpload          = createUpload

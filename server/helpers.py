@@ -19,10 +19,6 @@ from girder.plugins.worker.utils import \
 from girder.models.model_base import ValidationException
 
 def resolveFileId(self, fileId, formatId=None, formatName=None):
-    print(self)
-    print(fileId)
-    print(formatId)
-    print(formatName)
     videoModel = self.model('video', 'video')
 
     fileId = objectIdOrNone(fileId)
@@ -236,8 +232,9 @@ def removeVideoData(
         videoModel.remove(vData)
 
         try:
-            fileModel.remove(file)
-            deletedFiles.add(str(file['_id']))
+            if file is not None:
+                fileModel.remove(file)
+                deletedFiles.add(str(file['_id']))
         except ValidationException:
             pass
 
@@ -288,19 +285,21 @@ def analyzeVideo(self, fileId, force=False, formatId=None, user=None):
             result = {
                 'video': {
                     'jobCreated': False,
-                    'message': 'Processing job already created.'
+                    'message': 'Analysis job already created.'
                 }
             }
 
             result.update(job)
             return result
 
-    # if we are *re*running a processing job (force=True), remove all data
-    # for this video that were created by the last processing jobs
+    # if we are *re*running an analysis job (force=True), remove all data
+    # for this video that were created by the last analysis job, and all data
+    # create by jobs that depend on the results of the analysis job
     if force:
         cancelVideoJobs(
-            self, fileId, formatId=formatId, user=user,
-            mask=VideoEnum.ANALYSIS, cascade=False)
+            self, fileId, formatId=formatId, user=user)
+        removeVideoData(
+            self, fileId, formatId=formatId, user=user)
 
     # begin construction of the actual job
     if not userToken:
@@ -478,22 +477,24 @@ def transcodeVideo(self, fileId, formatId, force=False, user=None):
             result = {
                 'video': {
                     'jobCreated': False,
-                    'message': 'Processing job already created.'
+                    'message': 'Transcoding job already created.'
                 }
             }
 
             result.update(job)
             return result
 
-    # if we are *re*running a processing job (force=True), remove all data
-    # for this video that were created by the last processing jobs
+    # if we are *re*running a transcoding job (force=True), remove all data
+    # for this video that were created by the last transcoding job, and any
+    # frames extracted from the old results
     if force:
         cancelVideoJobs(self, fileId, formatId=formatId, user=user,
             mask=VideoEnum.TRANSCODING | VideoEnum.FRAME_EXTRACTION,
             cascade=False)
 
         removeVideoData(self, fileId, formatId=formatId, user=user,
-            mask=VideoEnum.FILE, cascade=False)
+            mask=VideoEnum.FILE | VideoEnum.FRAME,
+            cascade=False)
 
     # begin construction of the actual job
     if not userToken:
@@ -619,6 +620,10 @@ def transcodeVideo(self, fileId, formatId, force=False, user=None):
     result.update(job)
     return result
 
+from .utils import debug, loud
+
+@loud
+@debug
 def extractFrames(
         self, fileId, numFrames, formatId=None, user=None, force=False):
     userToken = None
@@ -664,15 +669,15 @@ def extractFrames(
             result = {
                 'video': {
                     'jobCreated': False,
-                    'message': 'Processing job already created.'
+                    'message': 'Extraction job already created.'
                 }
             }
 
             result.update(job)
             return result
 
-    # if we are *re*running a processing job (force=True), remove all data
-    # for this video that were created by the last processing jobs
+    # if we are *re*running a frame extraction job (force=True), remove all
+    # frames for this video that were created by the last extraction job
     if force:
         cancelVideoJobs(self, fileId, formatId=formatId, user=user,
             mask=VideoEnum.FRAME_EXTRACTION, cascade=False)
@@ -771,7 +776,7 @@ def extractFrames(
     job = jobModel.save(job)
     jobModel.scheduleJob(job)
 
-    videoModel.createVideoJob(
+    vJob = videoModel.createVideoJob(
         fileId=inputFile['_id'],
         sourceFileId=fileId,
         formatId=formatId,
