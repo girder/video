@@ -47,3 +47,20 @@ class JobStatus:
 
 JobStatus = JobStatus()
 
+class VideoEnum:
+    """Enum type for Video plugin"""
+    FILE             = 1 <<  0
+    FORMAT           = 1 <<  1
+    FRAME            = 1 <<  2
+    JOB              = 1 <<  3
+
+    ANALYSIS         = 1 << 10
+    TRANSCODING      = 1 << 11
+    FRAME_EXTRACTION = 1 << 12
+
+class VideoEvents:
+    """Enum type for Video plugin events"""
+    ANALYZE          = 'video.analyze'
+    FRAME_EXTRACT    = 'video.frame.extract'
+    FILE_UPLOADED    = 'data.process'
+    FILE_DELETED     = 'model.file.remove'
